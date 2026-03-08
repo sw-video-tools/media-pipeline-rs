@@ -812,9 +812,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "pipeline-types",
- "reqwest",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 

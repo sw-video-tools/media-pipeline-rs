@@ -28,9 +28,13 @@ async fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
+    let queue_path: PathBuf = std::env::var("QUEUE_DB")
+        .unwrap_or_else(|_| "./data/queue.db".into())
+        .into();
+
     let state = AppState {
         store: Arc::new(ArtifactStore::open(&db_path)?),
-        queue: Arc::new(JobQueue::new()),
+        queue: Arc::new(JobQueue::open(&queue_path)?),
     };
 
     let app = Router::new()
@@ -67,7 +71,7 @@ async fn create_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state
         .queue
-        .enqueue(&job)
+        .enqueue(&job.job_id, "Planning")
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
