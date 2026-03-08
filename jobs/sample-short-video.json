@@ -1,0 +1,9 @@
+{
+  "title": "RLM Short",
+  "idea": "A 2-minute explainer on Recursive Language Models for Rust developers",
+  "audience": "Developers and AI builders",
+  "target_duration_seconds": 120,
+  "tone": "practical, clever",
+  "must_include": ["context rot", "recursive inspection", "media pipeline angle"],
+  "must_avoid": ["hype", "unsupported claims"]
+}

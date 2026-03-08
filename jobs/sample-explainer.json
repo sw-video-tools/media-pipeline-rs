@@ -1,0 +1,9 @@
+{
+  "title": "Media Pipeline Explainer",
+  "idea": "Show how AI services plus deterministic tools can build a video pipeline",
+  "audience": "Engineers",
+  "target_duration_seconds": 480,
+  "tone": "technical",
+  "must_include": ["validation", "typed artifacts", "retries"],
+  "must_avoid": ["black-box agent claims"]
+}

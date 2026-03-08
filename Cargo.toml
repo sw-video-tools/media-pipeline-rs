@@ -1,0 +1,52 @@
+[workspace]
+members = [
+  "crates/pipeline-types",
+  "crates/artifact-store",
+  "crates/job-queue",
+  "crates/provider-router",
+  "crates/rlm-client",
+  "crates/media-tools",
+  "crates/validator-core",
+  "crates/prompt-templates",
+  "crates/telemetry",
+  "services/api-gateway",
+  "services/planner-service",
+  "services/research-service",
+  "services/script-service",
+  "services/storyboard-service",
+  "services/visual-gen-service",
+  "services/music-service",
+  "services/sfx-service",
+  "services/tts-service",
+  "services/asr-validation-service",
+  "services/captions-service",
+  "services/render-service",
+  "services/qa-service",
+  "services/preview-service",
+  "services/orchestrator-service",
+  "apps/operator-cli",
+  "apps/review-web"
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+authors = ["OpenAI"]
+
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "serde"] }

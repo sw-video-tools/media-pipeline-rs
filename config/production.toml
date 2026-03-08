@@ -1,0 +1,13 @@
+[api]
+bind = "0.0.0.0:3000"
+
+[artifacts]
+root = "/var/lib/media-pipeline/artifacts"
+
+[rlm]
+base_url = "http://rlm-service:8080"
+
+[providers]
+default_llm = "openai"
+default_tts = "openai"
+default_image = "openai"

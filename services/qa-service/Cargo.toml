@@ -1,0 +1,20 @@
+[package]
+name = "qa-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+pipeline-types = { path = "../../crates/pipeline-types", package = "pipeline-types" }
+telemetry = { path = "../../crates/telemetry", package = "telemetry" }
+media-tools = { path = "../../crates/media-tools", package = "media-tools" }
+validator-core = { path = "../../crates/validator-core", package = "validator-core" }

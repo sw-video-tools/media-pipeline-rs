@@ -1,0 +1,15 @@
+[planning]
+provider = "openai"
+model = "gpt-4.1"
+
+[script]
+provider = "openai"
+model = "gpt-4.1"
+
+[tts]
+provider = "openai"
+model = "gpt-4o-mini-tts"
+
+[asr]
+provider = "openai"
+model = "gpt-4o-transcribe"

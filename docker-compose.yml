@@ -1,0 +1,9 @@
+services:
+  api-gateway:
+    image: rust:latest
+    working_dir: /workspace
+    command: bash -lc "cargo run -p api-gateway"
+    volumes:
+      - ./:/workspace
+    ports:
+      - "3000:3000"

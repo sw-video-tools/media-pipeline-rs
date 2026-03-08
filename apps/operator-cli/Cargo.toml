@@ -1,0 +1,12 @@
+[package]
+name = "operator-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+telemetry = { path = "../../crates/telemetry", package = "telemetry" }
