@@ -86,3 +86,25 @@ pub struct PipelineJob {
     pub current_stage: Stage,
     pub request: PipelineJobRequest,
 }
+
+/// A planned segment within the project plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannedSegment {
+    pub segment_number: u32,
+    pub title: String,
+    pub duration_seconds: u32,
+    pub description: String,
+    pub visual_style: String,
+}
+
+/// Output of the planning stage: a structured project plan.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectPlan {
+    pub job_id: String,
+    pub title: String,
+    pub synopsis: String,
+    pub total_duration_seconds: u32,
+    pub segments: Vec<PlannedSegment>,
+    pub research_queries: Vec<String>,
+    pub narration_tone: String,
+}
