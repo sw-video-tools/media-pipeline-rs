@@ -87,6 +87,23 @@ pub struct PipelineJob {
     pub request: PipelineJobRequest,
 }
 
+/// A verified fact from research, with source attribution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchFact {
+    pub claim: String,
+    pub source: String,
+    pub confidence: f32,
+}
+
+/// Output of the research stage: gathered facts for script writing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchPacket {
+    pub job_id: String,
+    pub query: String,
+    pub facts: Vec<ResearchFact>,
+    pub summary: String,
+}
+
 /// A planned segment within the project plan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannedSegment {

@@ -1387,16 +1387,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "chrono",
  "pipeline-types",
+ "reqwest",
  "rlm-client",
  "serde",
  "serde_json",
  "telemetry",
  "tokio",
- "tower-http",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -1433,6 +1431,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
 ]
 
