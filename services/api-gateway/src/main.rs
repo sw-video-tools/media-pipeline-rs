@@ -1,9 +1,14 @@
+use std::path::PathBuf;
+use std::{net::SocketAddr, sync::Arc};
+
 use artifact_store::ArtifactStore;
-use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
 use chrono::Utc;
 use job_queue::JobQueue;
 use pipeline_types::{JobStatus, PipelineJob, PipelineJobRequest, Stage};
-use std::{net::SocketAddr, sync::Arc};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -15,8 +20,16 @@ struct AppState {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     telemetry::init();
+
+    let db_path: PathBuf = std::env::var("SQLITE_DB")
+        .unwrap_or_else(|_| "./data/pipeline.db".into())
+        .into();
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
     let state = AppState {
-        store: Arc::new(ArtifactStore::new()),
+        store: Arc::new(ArtifactStore::open(&db_path)?),
         queue: Arc::new(JobQueue::new()),
     };
 
@@ -47,8 +60,16 @@ async fn create_job(
         request: req,
     };
 
-    state.store.save_job(&job).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    state.queue.enqueue(&job).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .store
+        .save_job(&job)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .queue
+        .enqueue(&job)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok((StatusCode::CREATED, Json(job)))
 }
