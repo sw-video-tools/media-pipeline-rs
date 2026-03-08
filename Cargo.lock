@@ -1527,16 +1527,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
- "chrono",
  "pipeline-types",
+ "prompt-templates",
  "provider-router",
+ "reqwest",
  "serde",
  "serde_json",
  "telemetry",
  "tokio",
- "tower-http",
  "tracing",
- "uuid",
 ]
 
 [[package]]

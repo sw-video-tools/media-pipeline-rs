@@ -125,3 +125,22 @@ pub struct ProjectPlan {
     pub research_queries: Vec<String>,
     pub narration_tone: String,
 }
+
+/// A single narration segment with timing and visual cues.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptSegment {
+    pub segment_number: u32,
+    pub title: String,
+    pub narration_text: String,
+    pub estimated_duration_seconds: u32,
+    pub visual_notes: String,
+}
+
+/// Output of the script stage: full narration script with segments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NarrationScript {
+    pub job_id: String,
+    pub title: String,
+    pub total_duration_seconds: u32,
+    pub segments: Vec<ScriptSegment>,
+}
