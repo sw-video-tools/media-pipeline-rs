@@ -1004,17 +1004,17 @@ name = "orchestrator-service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "artifact-store",
  "axum",
  "chrono",
+ "job-queue",
  "pipeline-types",
- "rlm-client",
+ "reqwest",
  "serde",
  "serde_json",
  "telemetry",
  "tokio",
- "tower-http",
  "tracing",
- "uuid",
 ]
 
 [[package]]

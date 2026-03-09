@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -76,6 +78,60 @@ pub enum Stage {
     QaFinal,
     Complete,
     Failed,
+}
+
+impl fmt::Display for Stage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Planning => write!(f, "Planning"),
+            Self::Research => write!(f, "Research"),
+            Self::Script => write!(f, "Script"),
+            Self::Storyboard => write!(f, "Storyboard"),
+            Self::VisualGeneration => write!(f, "VisualGeneration"),
+            Self::MusicGeneration => write!(f, "MusicGeneration"),
+            Self::Tts => write!(f, "Tts"),
+            Self::AsrValidation => write!(f, "AsrValidation"),
+            Self::Captions => write!(f, "Captions"),
+            Self::RenderPreview => write!(f, "RenderPreview"),
+            Self::QaPreview => write!(f, "QaPreview"),
+            Self::RenderFinal => write!(f, "RenderFinal"),
+            Self::QaFinal => write!(f, "QaFinal"),
+            Self::Complete => write!(f, "Complete"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
+impl Stage {
+    /// Return the next stage in the MVP pipeline, or None if complete/failed.
+    pub fn next_mvp(&self) -> Option<Stage> {
+        match self {
+            Self::Planning => Some(Self::Research),
+            Self::Research => Some(Self::Script),
+            Self::Script => Some(Self::Tts),
+            Self::Tts => Some(Self::AsrValidation),
+            Self::AsrValidation => Some(Self::Captions),
+            Self::Captions => Some(Self::RenderFinal),
+            Self::RenderFinal => Some(Self::QaFinal),
+            Self::QaFinal => Some(Self::Complete),
+            Self::Complete | Self::Failed => None,
+            // Non-MVP stages skip to next MVP stage
+            Self::Storyboard | Self::VisualGeneration | Self::MusicGeneration => Some(Self::Tts),
+            Self::RenderPreview | Self::QaPreview => Some(Self::RenderFinal),
+        }
+    }
+}
+
+impl fmt::Display for JobStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Queued => write!(f, "Queued"),
+            Self::Running => write!(f, "Running"),
+            Self::WaitingForReview => write!(f, "WaitingForReview"),
+            Self::Completed => write!(f, "Completed"),
+            Self::Failed => write!(f, "Failed"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
