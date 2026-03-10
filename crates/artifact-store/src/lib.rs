@@ -47,6 +47,13 @@ impl ArtifactStore {
                 status          TEXT NOT NULL,
                 current_stage   TEXT NOT NULL,
                 request_json    TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS stage_outputs (
+                job_id      TEXT NOT NULL,
+                stage       TEXT NOT NULL,
+                output_json TEXT NOT NULL,
+                created_at  TEXT NOT NULL,
+                PRIMARY KEY (job_id, stage)
             );",
         )?;
         Ok(())
@@ -96,6 +103,46 @@ impl ArtifactStore {
             .query_map([], row_to_job)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(jobs)
+    }
+
+    /// Save the JSON output of a completed stage for a job.
+    pub async fn save_stage_output(
+        &self,
+        job_id: &str,
+        stage: &str,
+        output: &serde_json::Value,
+    ) -> Result<()> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO stage_outputs (job_id, stage, output_json, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            (
+                job_id,
+                stage,
+                serde_json::to_string(output)?,
+                chrono::Utc::now().to_rfc3339(),
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Retrieve the output of a completed stage for a job.
+    pub async fn get_stage_output(
+        &self,
+        job_id: &str,
+        stage: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        let mut stmt =
+            conn.prepare("SELECT output_json FROM stage_outputs WHERE job_id = ?1 AND stage = ?2")?;
+        let result = stmt
+            .query_map((job_id, stage), |row| row.get::<_, String>(0))?
+            .next()
+            .transpose()?;
+        match result {
+            Some(json_str) => Ok(Some(serde_json::from_str(&json_str)?)),
+            None => Ok(None),
+        }
     }
 
     /// Update a job's status and current stage.
@@ -236,6 +283,54 @@ mod tests {
         let jobs = store.list_jobs().await.unwrap();
         assert_eq!(jobs.len(), 1);
         assert!(matches!(jobs[0].status, JobStatus::Completed));
+    }
+
+    #[tokio::test]
+    async fn save_and_get_stage_output() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let output = serde_json::json!({"plan_id": "p-1", "segments": []});
+
+        store
+            .save_stage_output("job-1", "Planning", &output)
+            .await
+            .unwrap();
+
+        let fetched = store
+            .get_stage_output("job-1", "Planning")
+            .await
+            .unwrap()
+            .expect("output not found");
+        assert_eq!(fetched["plan_id"], "p-1");
+    }
+
+    #[tokio::test]
+    async fn get_missing_stage_output_returns_none() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let result = store.get_stage_output("nope", "Planning").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn stage_output_upserts() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let v1 = serde_json::json!({"version": 1});
+        let v2 = serde_json::json!({"version": 2});
+
+        store
+            .save_stage_output("job-1", "Planning", &v1)
+            .await
+            .unwrap();
+        store
+            .save_stage_output("job-1", "Planning", &v2)
+            .await
+            .unwrap();
+
+        let fetched = store
+            .get_stage_output("job-1", "Planning")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fetched["version"], 2);
     }
 
     #[tokio::test]

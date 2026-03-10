@@ -324,7 +324,7 @@ async fn dispatch_stage(
         Err(e) => return DispatchOutcome::Failed(format!("store error: {e}")),
     };
 
-    let body = match build_stage_request(stage, &job) {
+    let body = match build_stage_request(stage, &job, store).await {
         Ok(b) => b,
         Err(e) => return DispatchOutcome::Failed(format!("request build error: {e}")),
     };
@@ -345,6 +345,17 @@ async fn dispatch_stage(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         return DispatchOutcome::Failed(format!("service {stage} returned {status}: {text}"));
+    }
+
+    // Parse and persist the stage output for downstream stages.
+    let resp_body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return DispatchOutcome::Failed(format!("failed to parse response from {stage}: {e}"));
+        }
+    };
+    if let Err(e) = store.save_stage_output(job_id, stage, &resp_body).await {
+        error!(error = %e, "failed to save stage output (non-fatal)");
     }
 
     info!(job_id, stage, "stage completed successfully");
@@ -377,14 +388,20 @@ async fn dispatch_stage(
     DispatchOutcome::Ok(next)
 }
 
-/// Build the JSON body for a stage's service call from the job data.
-fn build_stage_request(
+/// Build the JSON body for a stage's service call.
+///
+/// Uses prior stage outputs when available; falls back to deriving
+/// from the original job request.
+async fn build_stage_request(
     stage: &str,
     job: &pipeline_types::PipelineJob,
+    store: &ArtifactStore,
 ) -> anyhow::Result<serde_json::Value> {
+    let job_id = &job.job_id;
+
     match stage {
         "Planning" => Ok(serde_json::json!({
-            "job_id": job.job_id,
+            "job_id": job_id,
             "title": job.request.title,
             "idea": job.request.idea,
             "audience": job.request.audience,
@@ -393,67 +410,152 @@ fn build_stage_request(
             "must_include": job.request.must_include,
             "must_avoid": job.request.must_avoid,
         })),
-        "Research" => Ok(serde_json::json!({
-            "job_id": job.job_id,
-            "queries": [
-                format!("{} overview", job.request.title),
-                format!("{} for {}", job.request.idea, job.request.audience),
-            ],
-        })),
-        "Script" => Ok(serde_json::json!({
-            "plan": {
-                "job_id": job.job_id,
-                "title": job.request.title,
-                "synopsis": job.request.idea,
-                "total_duration_seconds": job.request.target_duration_seconds,
-                "segments": [{
-                    "segment_number": 1,
+        "Research" => {
+            // Use planning output for research queries if available.
+            let plan = store
+                .get_stage_output(job_id, "Planning")
+                .await
+                .ok()
+                .flatten();
+            let queries = if let Some(ref p) = plan {
+                p["research_queries"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                vec![
+                    serde_json::json!(format!("{} overview", job.request.title)),
+                    serde_json::json!(format!("{} for {}", job.request.idea, job.request.audience)),
+                ]
+            };
+            Ok(serde_json::json!({
+                "job_id": job_id,
+                "queries": queries,
+            }))
+        }
+        "Script" => {
+            // Use planning output if available, else derive from request.
+            let plan = store
+                .get_stage_output(job_id, "Planning")
+                .await
+                .ok()
+                .flatten();
+            let plan_body = plan.unwrap_or_else(|| {
+                serde_json::json!({
+                    "job_id": job_id,
                     "title": job.request.title,
-                    "duration_seconds": job.request.target_duration_seconds,
-                    "description": job.request.idea,
-                    "visual_style": "default",
-                }],
-                "research_queries": [],
-                "narration_tone": job.request.tone,
-            },
-        })),
-        "Tts" => Ok(serde_json::json!({
-            "job_id": job.job_id,
-            "title": job.request.title,
-            "total_duration_seconds": job.request.target_duration_seconds,
-            "segments": [{
-                "segment_number": 1,
-                "title": job.request.title,
-                "narration_text": job.request.idea,
-                "estimated_duration_seconds": job.request.target_duration_seconds,
-                "visual_notes": "default",
-            }],
-        })),
-        "AsrValidation" => Ok(serde_json::json!({
-            "job_id": job.job_id,
-            "segments": [],
-        })),
-        "Captions" => Ok(serde_json::json!({
-            "job_id": job.job_id,
-            "title": job.request.title,
-            "total_duration_seconds": job.request.target_duration_seconds,
-            "segments": [{
-                "segment_number": 1,
-                "title": job.request.title,
-                "narration_text": job.request.idea,
-                "estimated_duration_seconds": job.request.target_duration_seconds,
-                "visual_notes": "default",
-            }],
-        })),
-        "RenderFinal" => Ok(serde_json::json!({
-            "job_id": job.job_id,
-            "audio_files": [],
-        })),
-        "QaFinal" => Ok(serde_json::json!({
-            "job_id": job.job_id,
-            "output_path": format!("./data/renders/{}.mp4", job.job_id),
-            "expected_duration_seconds": job.request.target_duration_seconds,
-        })),
+                    "synopsis": job.request.idea,
+                    "total_duration_seconds": job.request.target_duration_seconds,
+                    "segments": [{
+                        "segment_number": 1,
+                        "title": job.request.title,
+                        "duration_seconds": job.request.target_duration_seconds,
+                        "description": job.request.idea,
+                        "visual_style": "default",
+                    }],
+                    "research_queries": [],
+                    "narration_tone": job.request.tone,
+                })
+            });
+            Ok(serde_json::json!({ "plan": plan_body }))
+        }
+        "Tts" => {
+            // Use script output if available.
+            let script = store
+                .get_stage_output(job_id, "Script")
+                .await
+                .ok()
+                .flatten();
+            Ok(script.unwrap_or_else(|| {
+                serde_json::json!({
+                    "job_id": job_id,
+                    "title": job.request.title,
+                    "total_duration_seconds": job.request.target_duration_seconds,
+                    "segments": [{
+                        "segment_number": 1,
+                        "title": job.request.title,
+                        "narration_text": job.request.idea,
+                        "estimated_duration_seconds": job.request.target_duration_seconds,
+                        "visual_notes": "default",
+                    }],
+                })
+            }))
+        }
+        "AsrValidation" => {
+            // Use TTS output for audio paths + script for expected text.
+            let tts = store.get_stage_output(job_id, "Tts").await.ok().flatten();
+            let segments = if let Some(ref t) = tts {
+                t["segments"].as_array().cloned().unwrap_or_default()
+            } else {
+                vec![]
+            };
+            Ok(serde_json::json!({
+                "job_id": job_id,
+                "segments": segments,
+            }))
+        }
+        "Captions" => {
+            // Use script output if available.
+            let script = store
+                .get_stage_output(job_id, "Script")
+                .await
+                .ok()
+                .flatten();
+            Ok(script.unwrap_or_else(|| {
+                serde_json::json!({
+                    "job_id": job_id,
+                    "title": job.request.title,
+                    "total_duration_seconds": job.request.target_duration_seconds,
+                    "segments": [{
+                        "segment_number": 1,
+                        "title": job.request.title,
+                        "narration_text": job.request.idea,
+                        "estimated_duration_seconds": job.request.target_duration_seconds,
+                        "visual_notes": "default",
+                    }],
+                })
+            }))
+        }
+        "RenderFinal" => {
+            // Pull audio paths from TTS output.
+            let tts = store.get_stage_output(job_id, "Tts").await.ok().flatten();
+            let audio_files: Vec<serde_json::Value> = tts
+                .as_ref()
+                .and_then(|t| t["audio_files"].as_array().cloned())
+                .or_else(|| {
+                    tts.as_ref().and_then(|t| {
+                        t["segments"].as_array().map(|segs| {
+                            segs.iter()
+                                .filter_map(|s| {
+                                    s["audio_path"].as_str().map(|p| serde_json::json!(p))
+                                })
+                                .collect()
+                        })
+                    })
+                })
+                .unwrap_or_default();
+            Ok(serde_json::json!({
+                "job_id": job_id,
+                "audio_files": audio_files,
+            }))
+        }
+        "QaFinal" => {
+            // Pull output path from render output.
+            let render = store
+                .get_stage_output(job_id, "RenderFinal")
+                .await
+                .ok()
+                .flatten();
+            let output_path = render
+                .as_ref()
+                .and_then(|r| r["output_path"].as_str().map(String::from))
+                .unwrap_or_else(|| format!("./data/renders/{job_id}.mp4"));
+            Ok(serde_json::json!({
+                "job_id": job_id,
+                "output_path": output_path,
+                "expected_duration_seconds": job.request.target_duration_seconds,
+            }))
+        }
         _ => anyhow::bail!("unsupported stage: {stage}"),
     }
 }
@@ -482,26 +584,65 @@ mod tests {
         assert!(endpoint.ends_with("/plan"));
     }
 
-    #[test]
-    fn build_planning_request() {
+    #[tokio::test]
+    async fn build_planning_request() {
+        let store = ArtifactStore::open_in_memory().unwrap();
         let job = sample_job();
-        let body = build_stage_request("Planning", &job).unwrap();
+        let body = build_stage_request("Planning", &job, &store).await.unwrap();
         assert_eq!(body["job_id"], "test-1");
         assert_eq!(body["title"], "Test Video");
     }
 
-    #[test]
-    fn build_research_request() {
+    #[tokio::test]
+    async fn build_research_request_without_plan() {
+        let store = ArtifactStore::open_in_memory().unwrap();
         let job = sample_job();
-        let body = build_stage_request("Research", &job).unwrap();
+        let body = build_stage_request("Research", &job, &store).await.unwrap();
         assert_eq!(body["job_id"], "test-1");
         assert!(body["queries"].as_array().unwrap().len() >= 2);
     }
 
-    #[test]
-    fn build_unsupported_stage_errors() {
+    #[tokio::test]
+    async fn build_research_uses_plan_output() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let plan_output = serde_json::json!({
+            "job_id": "test-1",
+            "research_queries": ["query from plan"],
+        });
+        store
+            .save_stage_output("test-1", "Planning", &plan_output)
+            .await
+            .unwrap();
+
         let job = sample_job();
-        assert!(build_stage_request("Unknown", &job).is_err());
+        let body = build_stage_request("Research", &job, &store).await.unwrap();
+        let queries = body["queries"].as_array().unwrap();
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0], "query from plan");
+    }
+
+    #[tokio::test]
+    async fn build_qa_uses_render_output() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let render_output = serde_json::json!({
+            "job_id": "test-1",
+            "output_path": "/custom/path.mp4",
+        });
+        store
+            .save_stage_output("test-1", "RenderFinal", &render_output)
+            .await
+            .unwrap();
+
+        let job = sample_job();
+        let body = build_stage_request("QaFinal", &job, &store).await.unwrap();
+        assert_eq!(body["output_path"], "/custom/path.mp4");
+    }
+
+    #[tokio::test]
+    async fn build_unsupported_stage_errors() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let job = sample_job();
+        assert!(build_stage_request("Unknown", &job, &store).await.is_err());
     }
 
     #[test]

@@ -60,8 +60,8 @@ Every pipeline stage reads input artifact refs and writes output artifact refs. 
 
 - **`crates/`** — Shared libraries:
   - `pipeline-types`: Core types (`Stage`, `JobStatus`, `ArtifactEnvelope`, `ProjectPlan`, `NarrationScript`, `ResearchPacket`). `Stage` has `next_mvp()` for pipeline sequencing and `Display` impl.
-  - `artifact-store`: SQLite-backed job persistence (save/get/list/update jobs)
-  - `job-queue`: SQLite-backed FIFO queue with claim semantics (enqueue/dequeue/acknowledge)
+  - `artifact-store`: SQLite-backed job persistence (save/get/list/update jobs) + stage output storage (save_stage_output/get_stage_output) for inter-stage data flow
+  - `job-queue`: SQLite-backed FIFO queue with claim semantics (enqueue/dequeue/acknowledge/nack). `nack()` returns a claimed entry to the queue for retry.
   - `provider-router`: TOML-config-driven model routing (`from_file()`, `from_toml()`, `route_for()`)
   - `rlm-client`: HTTP client for RLM service with stub fallback
   - `media-tools`: `ffprobe` module (probe/duration/has_audio/has_video) + `ffmpeg` module (concat_audio/render_slideshow/measure_loudness)
