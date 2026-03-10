@@ -19,6 +19,15 @@ checkpoint:
     cargo clippy --all-targets --all-features -- -D warnings
     cargo fmt --all
 
+# Start api-gateway + orchestrator (the two always-on processes)
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'kill $(jobs -p) 2>/dev/null' EXIT
+    cargo run -p api-gateway &
+    cargo run -p orchestrator-service &
+    wait
+
 # Run individual services
 run-api:
     cargo run -p api-gateway

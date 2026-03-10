@@ -11,6 +11,7 @@ just fmt                  # cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 
 # Run services
+just dev                  # start api-gateway + orchestrator together
 just run-api              # cargo run -p api-gateway (port 3190)
 just run-orchestrator     # cargo run -p orchestrator-service (port 3199)
 
