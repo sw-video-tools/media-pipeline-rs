@@ -145,6 +145,29 @@ impl ArtifactStore {
         }
     }
 
+    /// List all completed stage outputs for a job, ordered by stage name.
+    pub async fn list_stage_outputs(
+        &self,
+        job_id: &str,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT stage, output_json FROM stage_outputs WHERE job_id = ?1 ORDER BY stage",
+        )?;
+        let rows: Vec<(String, serde_json::Value)> = stmt
+            .query_map([job_id], |row| {
+                let stage: String = row.get(0)?;
+                let json_str: String = row.get(1)?;
+                Ok((stage, json_str))
+            })?
+            .filter_map(|r| r.ok())
+            .filter_map(|(stage, json_str)| {
+                serde_json::from_str(&json_str).ok().map(|v| (stage, v))
+            })
+            .collect();
+        Ok(rows)
+    }
+
     /// Update a job's status and current stage.
     pub async fn update_job_status(
         &self,

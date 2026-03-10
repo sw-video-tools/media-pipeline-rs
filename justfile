@@ -66,5 +66,8 @@ submit FILE:
 status JOB_ID:
     cargo run -p operator-cli -- status {{JOB_ID}}
 
+detail JOB_ID:
+    cargo run -p operator-cli -- detail {{JOB_ID}}
+
 list-jobs:
     cargo run -p operator-cli -- list

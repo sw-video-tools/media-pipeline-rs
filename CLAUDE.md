@@ -21,6 +21,7 @@ cargo run -p <service-name>
 # Operator CLI
 cargo run -p operator-cli -- submit jobs/sample-explainer.json
 cargo run -p operator-cli -- status <job-id>
+cargo run -p operator-cli -- detail <job-id>
 cargo run -p operator-cli -- list
 
 # Tests
@@ -84,7 +85,7 @@ Driven by the **orchestrator-service** which polls the job-queue and calls each 
 
 | Port | Service | Endpoint |
 |------|---------|----------|
-| 3190 | api-gateway | GET/POST /jobs, GET /jobs/:id |
+| 3190 | api-gateway | GET/POST /jobs, GET /jobs/:id, GET /jobs/:id/detail |
 | 3191 | planner-service | POST /plan |
 | 3192 | research-service | POST /research |
 | 3193 | script-service | POST /script |

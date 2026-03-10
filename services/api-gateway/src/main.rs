@@ -18,6 +18,7 @@ use axum::{Json, Router};
 use chrono::Utc;
 use job_queue::JobQueue;
 use pipeline_types::{JobStatus, PipelineJob, PipelineJobRequest, Stage};
+use serde::Serialize;
 use tracing::info;
 use uuid::Uuid;
 
@@ -51,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/healthz", get(healthz))
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{id}", get(get_job))
+        .route("/jobs/{id}/detail", get(get_job_detail))
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("API_BIND")
@@ -115,6 +117,42 @@ async fn get_job(
     Ok(Json(job))
 }
 
+/// Enriched job detail with completed stage outputs.
+#[derive(Debug, Serialize)]
+struct JobDetail {
+    #[serde(flatten)]
+    job: PipelineJob,
+    completed_stages: Vec<String>,
+    stage_outputs: serde_json::Value,
+}
+
+async fn get_job_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<JobDetail>, StatusCode> {
+    let job = state
+        .store
+        .get_job(&id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let outputs = state
+        .store
+        .list_stage_outputs(&id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let completed_stages: Vec<String> = outputs.iter().map(|(s, _)| s.clone()).collect();
+    let stage_outputs: serde_json::Map<String, serde_json::Value> = outputs.into_iter().collect();
+
+    Ok(Json(JobDetail {
+        job,
+        completed_stages,
+        stage_outputs: serde_json::Value::Object(stage_outputs),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,6 +172,7 @@ mod tests {
             .route("/healthz", get(healthz))
             .route("/jobs", get(list_jobs).post(create_job))
             .route("/jobs/{id}", get(get_job))
+            .route("/jobs/{id}/detail", get(get_job_detail))
             .with_state(test_state())
     }
 
@@ -219,6 +258,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn get_job_detail_includes_stage_outputs() {
+        let state = test_state();
+
+        // Save a job and a stage output
+        let job = PipelineJob {
+            job_id: "detail-1".into(),
+            submitted_at: Utc::now(),
+            status: JobStatus::Running,
+            current_stage: Stage::Research,
+            request: PipelineJobRequest {
+                title: "Detail Test".into(),
+                idea: "test".into(),
+                audience: "devs".into(),
+                target_duration_seconds: 60,
+                tone: "casual".into(),
+                must_include: vec![],
+                must_avoid: vec![],
+            },
+        };
+        state.store.save_job(&job).await.unwrap();
+        state
+            .store
+            .save_stage_output("detail-1", "Planning", &serde_json::json!({"plan": "done"}))
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/jobs/{id}/detail", get(get_job_detail))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/jobs/detail-1/detail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let detail: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(detail["job_id"], "detail-1");
+        assert_eq!(detail["completed_stages"], serde_json::json!(["Planning"]));
+        assert_eq!(detail["stage_outputs"]["Planning"]["plan"], "done");
     }
 
     #[tokio::test]

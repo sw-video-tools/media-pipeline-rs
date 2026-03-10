@@ -3,6 +3,7 @@
 //! Usage:
 //!   operator-cli submit <file.json>
 //!   operator-cli status <job-id>
+//!   operator-cli detail <job-id>
 //!   operator-cli list
 
 use anyhow::{Context, Result};
@@ -26,6 +27,8 @@ enum Command {
     Submit { file: String },
     /// Check the status of a job
     Status { job_id: String },
+    /// Show detailed job info including stage outputs
+    Detail { job_id: String },
     /// List all jobs
     List,
 }
@@ -38,6 +41,7 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Command::Submit { file } => submit_job(&client, &cli.api_url, &file).await?,
         Command::Status { job_id } => get_status(&client, &cli.api_url, &job_id).await?,
+        Command::Detail { job_id } => get_detail(&client, &cli.api_url, &job_id).await?,
         Command::List => list_jobs(&client, &cli.api_url).await?,
     }
 
@@ -93,6 +97,65 @@ async fn get_status(client: &reqwest::Client, api_url: &str, job_id: &str) -> Re
     println!("Status: {}", job.status);
     println!("Stage:  {}", job.current_stage);
     println!("Submitted: {}", job.submitted_at);
+
+    Ok(())
+}
+
+async fn get_detail(client: &reqwest::Client, api_url: &str, job_id: &str) -> Result<()> {
+    let resp = client
+        .get(format!("{api_url}/jobs/{job_id}/detail"))
+        .send()
+        .await
+        .context("failed to connect to API gateway")?;
+
+    if resp.status().as_u16() == 404 {
+        anyhow::bail!("Job '{job_id}' not found");
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("API returned {status}");
+    }
+
+    let detail: serde_json::Value = resp.json().await.context("failed to parse response")?;
+
+    println!("Job:       {}", detail["job_id"].as_str().unwrap_or("?"));
+    println!(
+        "Title:     {}",
+        detail["request"]["title"].as_str().unwrap_or("?")
+    );
+    println!("Status:    {}", detail["status"].as_str().unwrap_or("?"));
+    println!(
+        "Stage:     {}",
+        detail["current_stage"].as_str().unwrap_or("?")
+    );
+    println!(
+        "Submitted: {}",
+        detail["submitted_at"].as_str().unwrap_or("?")
+    );
+
+    if let Some(stages) = detail["completed_stages"].as_array() {
+        if stages.is_empty() {
+            println!("\nNo completed stages yet.");
+        } else {
+            println!("\nCompleted stages:");
+            for stage in stages {
+                if let Some(name) = stage.as_str() {
+                    println!("  - {name}");
+                }
+            }
+        }
+    }
+
+    if let Some(outputs) = detail["stage_outputs"].as_object()
+        && !outputs.is_empty()
+    {
+        println!("\nStage outputs:");
+        for (stage, output) in outputs {
+            let summary = serde_json::to_string(output).unwrap_or_default();
+            let summary = truncate(&summary, 120);
+            println!("  {stage}: {summary}");
+        }
+    }
 
     Ok(())
 }
@@ -160,6 +223,12 @@ mod tests {
     fn cli_parses() {
         // Verify CLI struct can parse without panicking
         let cli = Cli::try_parse_from(["operator-cli", "list"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_detail() {
+        let cli = Cli::try_parse_from(["operator-cli", "detail", "job-123"]);
         assert!(cli.is_ok());
     }
 }
