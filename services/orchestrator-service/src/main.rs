@@ -71,6 +71,11 @@ impl ServiceRegistry {
         let path = stage_to_path(stage);
         Some(format!("{base}{path}"))
     }
+
+    fn healthz_url(&self, stage: &str) -> Option<String> {
+        let base = self.urls.get(stage)?;
+        Some(format!("{base}/healthz"))
+    }
 }
 
 /// Map stage names to their service endpoint paths.
@@ -295,6 +300,16 @@ fn is_service_unavailable(err: &reqwest::Error) -> bool {
     err.is_connect() || err.is_timeout()
 }
 
+/// Lightweight health probe — GET /healthz with a short timeout.
+/// Returns Ok(()) if the service responds 2xx, or an error message.
+async fn check_health(http: &reqwest::Client, url: &str) -> Result<(), String> {
+    match http.get(url).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => Err(format!("healthz returned {}", resp.status())),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
 /// Dispatch a single stage: call the service, update job status, return outcome.
 async fn dispatch_stage(
     http: &reqwest::Client,
@@ -307,6 +322,16 @@ async fn dispatch_stage(
         Ok(s) => s,
         Err(e) => return DispatchOutcome::Failed(format!("invalid stage '{stage}': {e}")),
     };
+
+    // Pre-flight health check — detect down services before doing any
+    // heavy work (building requests, updating status, etc.).
+    if let Some(healthz_url) = registry.healthz_url(stage)
+        && let Err(reason) = check_health(http, &healthz_url).await
+    {
+        return DispatchOutcome::ServiceUnavailable(format!(
+            "service {stage} failed health check: {reason}"
+        ));
+    }
 
     // Mark job as Running
     if let Err(e) = store
@@ -741,7 +766,12 @@ mod tests {
     async fn spawn_mock_service() -> String {
         use axum::routing::post;
 
+        async fn mock_healthz() -> &'static str {
+            "ok"
+        }
+
         let app = Router::new()
+            .route("/healthz", get(mock_healthz))
             .route("/plan", post(mock_stage_handler))
             .route("/research", post(mock_stage_handler))
             .route("/script", post(mock_stage_handler))
@@ -815,6 +845,35 @@ mod tests {
         assert!(
             matches!(outcome, DispatchOutcome::ServiceUnavailable(_)),
             "expected ServiceUnavailable, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_check_catches_down_service_before_dispatch() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let urls: HashMap<String, String> =
+            [("Planning".into(), "http://127.0.0.1:1".into())].into();
+        let registry = ServiceRegistry::from_map(urls);
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let job = sample_job();
+        store.save_job(&job).await.unwrap();
+
+        let outcome = dispatch_stage(&http, &registry, &store, "test-1", "Planning").await;
+        assert!(
+            matches!(outcome, DispatchOutcome::ServiceUnavailable(_)),
+            "expected ServiceUnavailable from health check, got {outcome:?}"
+        );
+
+        // Job status should NOT have been changed to Running since
+        // the health check fails before we update status.
+        let job = store.get_job("test-1").await.unwrap().unwrap();
+        assert!(
+            matches!(job.status, JobStatus::Queued),
+            "expected Queued (unchanged), got {}",
+            job.status
         );
     }
 
