@@ -21,3 +21,4 @@ job-queue = { path = "../../crates/job-queue", package = "job-queue" }
 
 [dev-dependencies]
 tower.workspace = true
+reqwest.workspace = true

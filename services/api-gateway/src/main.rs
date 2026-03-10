@@ -787,4 +787,162 @@ mod tests {
         };
         assert!(validate_request(&req).is_ok());
     }
+
+    /// Spin up the api-gateway on an ephemeral port and test the full
+    /// HTTP lifecycle: create → get → list → detail → events → retry → delete.
+    #[tokio::test]
+    async fn http_lifecycle() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/healthz", get(healthz))
+            .route("/jobs", get(list_jobs).post(create_job))
+            .route("/jobs/{id}", get(get_job).delete(delete_job))
+            .route("/jobs/{id}/detail", get(get_job_detail))
+            .route("/jobs/{id}/events", get(get_job_events))
+            .route("/jobs/{id}/retry", post(retry_job))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. Health check
+        let resp = client.get(format!("{base}/healthz")).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.text().await.unwrap(), "ok");
+
+        // 2. List jobs (empty)
+        let jobs: Vec<serde_json::Value> = client
+            .get(format!("{base}/jobs"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(jobs.is_empty());
+
+        // 3. Create a job
+        let body = serde_json::json!({
+            "title": "Integration Test",
+            "idea": "test idea",
+            "audience": "devs",
+            "target_duration_seconds": 60,
+            "tone": "casual",
+            "must_include": ["rust"],
+            "must_avoid": []
+        });
+        let resp = client
+            .post(format!("{base}/jobs"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+        let created: serde_json::Value = resp.json().await.unwrap();
+        let job_id = created["job_id"].as_str().unwrap();
+        assert_eq!(created["status"], "Queued");
+
+        // 4. Get job by ID
+        let resp = client
+            .get(format!("{base}/jobs/{job_id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let fetched: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(fetched["request"]["title"], "Integration Test");
+
+        // 5. List jobs (one)
+        let jobs: Vec<serde_json::Value> = client
+            .get(format!("{base}/jobs"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(jobs.len(), 1);
+
+        // 6. Get detail (no stage outputs yet)
+        let detail: serde_json::Value = client
+            .get(format!("{base}/jobs/{job_id}/detail"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(detail["completed_stages"].as_array().unwrap().is_empty());
+
+        // 7. Events (empty initially)
+        let events: Vec<serde_json::Value> = client
+            .get(format!("{base}/jobs/{job_id}/events"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(events.is_empty());
+
+        // 8. Retry (should fail — job is Queued, not Failed)
+        let resp = client
+            .post(format!("{base}/jobs/{job_id}/retry"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+        let err: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(err["code"], 409);
+
+        // 9. Not found
+        let resp = client
+            .get(format!("{base}/jobs/nonexistent"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        let err: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(err["code"], 404);
+
+        // 10. Validation error
+        let bad_body = serde_json::json!({
+            "title": "",
+            "idea": "test",
+            "audience": "devs",
+            "target_duration_seconds": 60,
+            "tone": "casual",
+            "must_include": [],
+            "must_avoid": []
+        });
+        let resp = client
+            .post(format!("{base}/jobs"))
+            .json(&bad_body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+
+        // 11. Delete
+        let resp = client
+            .delete(format!("{base}/jobs/{job_id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Verify deleted
+        let resp = client
+            .get(format!("{base}/jobs/{job_id}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
 }
