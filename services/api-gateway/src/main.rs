@@ -35,6 +35,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    fn bad_request(msg: impl Into<String>) -> Self {
+        Self {
+            code: 400,
+            error: msg.into(),
+        }
+    }
+
     fn not_found(msg: impl Into<String>) -> Self {
         Self {
             code: 404,
@@ -112,10 +119,44 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+fn validate_request(req: &PipelineJobRequest) -> Result<(), ApiError> {
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err(ApiError::bad_request("title must not be empty"));
+    }
+    if title.len() > 200 {
+        return Err(ApiError::bad_request(
+            "title must be 200 characters or fewer",
+        ));
+    }
+    if req.idea.trim().is_empty() {
+        return Err(ApiError::bad_request("idea must not be empty"));
+    }
+    if req.audience.trim().is_empty() {
+        return Err(ApiError::bad_request("audience must not be empty"));
+    }
+    if req.tone.trim().is_empty() {
+        return Err(ApiError::bad_request("tone must not be empty"));
+    }
+    if req.target_duration_seconds == 0 {
+        return Err(ApiError::bad_request(
+            "target_duration_seconds must be greater than 0",
+        ));
+    }
+    if req.target_duration_seconds > 3600 {
+        return Err(ApiError::bad_request(
+            "target_duration_seconds must be 3600 or fewer",
+        ));
+    }
+    Ok(())
+}
+
 async fn create_job(
     State(state): State<AppState>,
     Json(req): Json<PipelineJobRequest>,
 ) -> Result<(StatusCode, Json<PipelineJob>), ApiError> {
+    validate_request(&req)?;
+
     let job = PipelineJob {
         job_id: Uuid::new_v4().to_string(),
         submitted_at: Utc::now(),
@@ -683,5 +724,67 @@ mod tests {
         .unwrap();
         assert_eq!(body["code"], 409);
         assert!(body["error"].as_str().unwrap().contains("Running"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_title() {
+        let req = PipelineJobRequest {
+            title: "  ".into(),
+            idea: "test".into(),
+            audience: "devs".into(),
+            target_duration_seconds: 60,
+            tone: "casual".into(),
+            must_include: vec![],
+            must_avoid: vec![],
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert_eq!(err.code, 400);
+        assert!(err.error.contains("title"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_duration() {
+        let req = PipelineJobRequest {
+            title: "Test".into(),
+            idea: "test".into(),
+            audience: "devs".into(),
+            target_duration_seconds: 0,
+            tone: "casual".into(),
+            must_include: vec![],
+            must_avoid: vec![],
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert_eq!(err.code, 400);
+        assert!(err.error.contains("greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_excessive_duration() {
+        let req = PipelineJobRequest {
+            title: "Test".into(),
+            idea: "test".into(),
+            audience: "devs".into(),
+            target_duration_seconds: 7200,
+            tone: "casual".into(),
+            must_include: vec![],
+            must_avoid: vec![],
+        };
+        let err = validate_request(&req).unwrap_err();
+        assert_eq!(err.code, 400);
+        assert!(err.error.contains("3600"));
+    }
+
+    #[test]
+    fn validate_accepts_valid_request() {
+        let req = PipelineJobRequest {
+            title: "Test".into(),
+            idea: "test".into(),
+            audience: "devs".into(),
+            target_duration_seconds: 60,
+            tone: "casual".into(),
+            must_include: vec![],
+            must_avoid: vec![],
+        };
+        assert!(validate_request(&req).is_ok());
     }
 }
