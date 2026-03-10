@@ -17,6 +17,7 @@ use std::sync::Arc;
 use artifact_store::ArtifactStore;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -25,6 +26,43 @@ use pipeline_types::{JobStatus, PipelineJob, PipelineJobRequest, Stage};
 use serde::Serialize;
 use tracing::info;
 use uuid::Uuid;
+
+/// Structured error response returned as JSON.
+#[derive(Debug, Serialize)]
+struct ApiError {
+    code: u16,
+    error: String,
+}
+
+impl ApiError {
+    fn not_found(msg: impl Into<String>) -> Self {
+        Self {
+            code: 404,
+            error: msg.into(),
+        }
+    }
+
+    fn conflict(msg: impl Into<String>) -> Self {
+        Self {
+            code: 409,
+            error: msg.into(),
+        }
+    }
+
+    fn internal(msg: impl Into<String>) -> Self {
+        Self {
+            code: 500,
+            error: msg.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        (status, Json(self)).into_response()
+    }
+}
 
 #[derive(Clone)]
 struct AppState {
@@ -77,7 +115,7 @@ async fn healthz() -> &'static str {
 async fn create_job(
     State(state): State<AppState>,
     Json(req): Json<PipelineJobRequest>,
-) -> Result<(StatusCode, Json<PipelineJob>), StatusCode> {
+) -> Result<(StatusCode, Json<PipelineJob>), ApiError> {
     let job = PipelineJob {
         job_id: Uuid::new_v4().to_string(),
         submitted_at: Utc::now(),
@@ -90,36 +128,36 @@ async fn create_job(
         .store
         .save_job(&job)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to save job: {e}")))?;
     state
         .queue
         .enqueue(&job.job_id, "Planning")
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to enqueue job: {e}")))?;
 
     info!(job_id = %job.job_id, "job created");
     Ok((StatusCode::CREATED, Json(job)))
 }
 
-async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<PipelineJob>>, StatusCode> {
+async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<PipelineJob>>, ApiError> {
     let jobs = state
         .store
         .list_jobs()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to list jobs: {e}")))?;
     Ok(Json(jobs))
 }
 
 async fn get_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<PipelineJob>, StatusCode> {
+) -> Result<Json<PipelineJob>, ApiError> {
     let job = state
         .store
         .get_job(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| ApiError::internal(format!("failed to get job: {e}")))?
+        .ok_or_else(|| ApiError::not_found(format!("job '{id}' not found")))?;
     Ok(Json(job))
 }
 
@@ -135,19 +173,19 @@ struct JobDetail {
 async fn get_job_detail(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<JobDetail>, StatusCode> {
+) -> Result<Json<JobDetail>, ApiError> {
     let job = state
         .store
         .get_job(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| ApiError::internal(format!("failed to get job: {e}")))?
+        .ok_or_else(|| ApiError::not_found(format!("job '{id}' not found")))?;
 
     let outputs = state
         .store
         .list_stage_outputs(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to list stage outputs: {e}")))?;
 
     let completed_stages: Vec<String> = outputs.iter().map(|(s, _)| s.clone()).collect();
     let stage_outputs: serde_json::Map<String, serde_json::Value> = outputs.into_iter().collect();
@@ -162,28 +200,31 @@ async fn get_job_detail(
 async fn get_job_events(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<artifact_store::JobEvent>>, StatusCode> {
+) -> Result<Json<Vec<artifact_store::JobEvent>>, ApiError> {
     let events = state
         .store
         .list_events(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to list events: {e}")))?;
     Ok(Json(events))
 }
 
 async fn retry_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, ApiError> {
     let job = state
         .store
         .get_job(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|e| ApiError::internal(format!("failed to get job: {e}")))?
+        .ok_or_else(|| ApiError::not_found(format!("job '{id}' not found")))?;
 
     if !matches!(job.status, JobStatus::Failed) {
-        return Err(StatusCode::CONFLICT);
+        return Err(ApiError::conflict(format!(
+            "job '{id}' is {} — only failed jobs can be retried",
+            job.status,
+        )));
     }
 
     // Reset to Queued and re-enqueue at the failed stage.
@@ -192,12 +233,12 @@ async fn retry_job(
         .store
         .update_job_status(&id, &JobStatus::Queued, &job.current_stage)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to update job status: {e}")))?;
     state
         .queue
         .enqueue(&id, &stage_str)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to enqueue job: {e}")))?;
 
     info!(job_id = %id, stage = %stage_str, "job retried");
     Ok(StatusCode::OK)
@@ -206,24 +247,24 @@ async fn retry_job(
 async fn delete_job(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<StatusCode, ApiError> {
     // Remove queue entries first, then the job data.
     state
         .queue
         .remove_by_job_id(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to remove queue entries: {e}")))?;
     let deleted = state
         .store
         .delete_job(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| ApiError::internal(format!("failed to delete job: {e}")))?;
 
     if deleted {
         info!(job_id = %id, "job deleted");
         Ok(StatusCode::OK)
     } else {
-        Err(StatusCode::NOT_FOUND)
+        Err(ApiError::not_found(format!("job '{id}' not found")))
     }
 }
 
@@ -575,5 +616,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    #[tokio::test]
+    async fn error_response_contains_json_body() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::get("/jobs/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["code"], 404);
+        assert!(body["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn retry_conflict_returns_json_error() {
+        let state = test_state();
+        let job = PipelineJob {
+            job_id: "err-1".into(),
+            submitted_at: Utc::now(),
+            status: JobStatus::Running,
+            current_stage: Stage::Script,
+            request: PipelineJobRequest {
+                title: "Test".into(),
+                idea: "test".into(),
+                audience: "devs".into(),
+                target_duration_seconds: 60,
+                tone: "casual".into(),
+                must_include: vec![],
+                must_avoid: vec![],
+            },
+        };
+        state.store.save_job(&job).await.unwrap();
+
+        let app = Router::new()
+            .route("/jobs/{id}/retry", post(retry_job))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/jobs/err-1/retry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["code"], 409);
+        assert!(body["error"].as_str().unwrap().contains("Running"));
     }
 }
