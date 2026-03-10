@@ -125,6 +125,13 @@ impl JobQueue {
         Ok(())
     }
 
+    /// Remove all queue entries for a given job.
+    pub async fn remove_by_job_id(&self, job_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        let deleted = conn.execute("DELETE FROM queue WHERE job_id = ?1", [job_id])?;
+        Ok(deleted)
+    }
+
     /// Return the number of unclaimed entries.
     pub async fn pending_count(&self) -> Result<usize> {
         let conn = self.conn.lock().expect("lock poisoned");
@@ -224,5 +231,21 @@ mod tests {
 
         q.dequeue().await.unwrap(); // claims one
         assert_eq!(q.pending_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_by_job_id_clears_all_entries() {
+        let q = JobQueue::open_in_memory().unwrap();
+        q.enqueue("x", "Planning").await.unwrap();
+        q.enqueue("x", "Research").await.unwrap();
+        q.enqueue("y", "Script").await.unwrap();
+
+        let removed = q.remove_by_job_id("x").await.unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(q.pending_count().await.unwrap(), 1);
+
+        // Remaining entry belongs to job "y"
+        let entry = q.dequeue().await.unwrap().unwrap();
+        assert_eq!(entry.job_id, "y");
     }
 }

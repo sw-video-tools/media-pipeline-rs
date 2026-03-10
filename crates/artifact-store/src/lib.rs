@@ -216,6 +216,15 @@ impl ArtifactStore {
         Ok(events)
     }
 
+    /// Delete a job and all its associated data (stage outputs, events).
+    pub async fn delete_job(&self, job_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        conn.execute("DELETE FROM stage_outputs WHERE job_id = ?1", [job_id])?;
+        conn.execute("DELETE FROM job_events WHERE job_id = ?1", [job_id])?;
+        let deleted = conn.execute("DELETE FROM jobs WHERE job_id = ?1", [job_id])?;
+        Ok(deleted > 0)
+    }
+
     /// Update a job's status and current stage.
     pub async fn update_job_status(
         &self,
@@ -436,6 +445,40 @@ mod tests {
         let store = ArtifactStore::open_in_memory().unwrap();
         let events = store.list_events("nonexistent").await.unwrap();
         assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_job_removes_all_data() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        store.save_job(&sample_job("del-1")).await.unwrap();
+        store
+            .save_stage_output("del-1", "Planning", &serde_json::json!({"done": true}))
+            .await
+            .unwrap();
+        store
+            .append_event("del-1", "info", "test event")
+            .await
+            .unwrap();
+
+        let deleted = store.delete_job("del-1").await.unwrap();
+        assert!(deleted);
+
+        assert!(store.get_job("del-1").await.unwrap().is_none());
+        assert!(
+            store
+                .get_stage_output("del-1", "Planning")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.list_events("del-1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_missing_job_returns_false() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let deleted = store.delete_job("nope").await.unwrap();
+        assert!(!deleted);
     }
 
     #[tokio::test]

@@ -6,6 +6,8 @@
 //! - GET  /jobs/:id   — get a single job by ID
 //! - GET  /jobs/:id/detail  — enriched job with stage outputs
 //! - GET  /jobs/:id/events  — job event log
+//! - POST /jobs/:id/retry  — re-enqueue a failed job
+//! - DELETE /jobs/:id      — remove a job and its data
 //! - GET  /healthz    — health check
 
 use std::net::SocketAddr;
@@ -15,7 +17,7 @@ use std::sync::Arc;
 use artifact_store::ArtifactStore;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use job_queue::JobQueue;
@@ -53,9 +55,10 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/jobs", get(list_jobs).post(create_job))
-        .route("/jobs/{id}", get(get_job))
+        .route("/jobs/{id}", get(get_job).delete(delete_job))
         .route("/jobs/{id}/detail", get(get_job_detail))
         .route("/jobs/{id}/events", get(get_job_events))
+        .route("/jobs/{id}/retry", post(retry_job))
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("API_BIND")
@@ -168,6 +171,62 @@ async fn get_job_events(
     Ok(Json(events))
 }
 
+async fn retry_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let job = state
+        .store
+        .get_job(&id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if !matches!(job.status, JobStatus::Failed) {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Reset to Queued and re-enqueue at the failed stage.
+    let stage_str = job.current_stage.to_string();
+    state
+        .store
+        .update_job_status(&id, &JobStatus::Queued, &job.current_stage)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .queue
+        .enqueue(&id, &stage_str)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    info!(job_id = %id, stage = %stage_str, "job retried");
+    Ok(StatusCode::OK)
+}
+
+async fn delete_job(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    // Remove queue entries first, then the job data.
+    state
+        .queue
+        .remove_by_job_id(&id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let deleted = state
+        .store
+        .delete_job(&id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if deleted {
+        info!(job_id = %id, "job deleted");
+        Ok(StatusCode::OK)
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,9 +245,10 @@ mod tests {
         Router::new()
             .route("/healthz", get(healthz))
             .route("/jobs", get(list_jobs).post(create_job))
-            .route("/jobs/{id}", get(get_job))
+            .route("/jobs/{id}", get(get_job).delete(delete_job))
             .route("/jobs/{id}/detail", get(get_job_detail))
             .route("/jobs/{id}/events", get(get_job_events))
+            .route("/jobs/{id}/retry", post(retry_job))
             .with_state(test_state())
     }
 
@@ -383,5 +443,137 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0]["level"], "info");
         assert!(events[0]["message"].as_str().unwrap().contains("Planning"));
+    }
+
+    #[tokio::test]
+    async fn retry_failed_job() {
+        let state = test_state();
+        let job = PipelineJob {
+            job_id: "retry-1".into(),
+            submitted_at: Utc::now(),
+            status: JobStatus::Failed,
+            current_stage: Stage::Script,
+            request: PipelineJobRequest {
+                title: "Retry Test".into(),
+                idea: "test".into(),
+                audience: "devs".into(),
+                target_duration_seconds: 60,
+                tone: "casual".into(),
+                must_include: vec![],
+                must_avoid: vec![],
+            },
+        };
+        state.store.save_job(&job).await.unwrap();
+
+        let app = Router::new()
+            .route("/jobs/{id}/retry", post(retry_job))
+            .with_state(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::post("/jobs/retry-1/retry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Job should now be Queued
+        let updated = state.store.get_job("retry-1").await.unwrap().unwrap();
+        assert!(matches!(updated.status, JobStatus::Queued));
+
+        // Queue should have an entry
+        assert_eq!(state.queue.pending_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn retry_non_failed_job_returns_conflict() {
+        let state = test_state();
+        let job = PipelineJob {
+            job_id: "retry-2".into(),
+            submitted_at: Utc::now(),
+            status: JobStatus::Running,
+            current_stage: Stage::Script,
+            request: PipelineJobRequest {
+                title: "Retry Test".into(),
+                idea: "test".into(),
+                audience: "devs".into(),
+                target_duration_seconds: 60,
+                tone: "casual".into(),
+                must_include: vec![],
+                must_avoid: vec![],
+            },
+        };
+        state.store.save_job(&job).await.unwrap();
+
+        let app = Router::new()
+            .route("/jobs/{id}/retry", post(retry_job))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::post("/jobs/retry-2/retry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 409);
+    }
+
+    #[tokio::test]
+    async fn delete_job_removes_data() {
+        let state = test_state();
+        let job = PipelineJob {
+            job_id: "del-1".into(),
+            submitted_at: Utc::now(),
+            status: JobStatus::Completed,
+            current_stage: Stage::Complete,
+            request: PipelineJobRequest {
+                title: "Delete Test".into(),
+                idea: "test".into(),
+                audience: "devs".into(),
+                target_duration_seconds: 60,
+                tone: "casual".into(),
+                must_include: vec![],
+                must_avoid: vec![],
+            },
+        };
+        state.store.save_job(&job).await.unwrap();
+        state
+            .store
+            .save_stage_output("del-1", "Planning", &serde_json::json!({"done": true}))
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/jobs/{id}", get(get_job).delete(delete_job))
+            .with_state(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(Request::delete("/jobs/del-1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Job should be gone
+        let result = state.store.get_job("del-1").await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_missing_job_returns_404() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::delete("/jobs/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
     }
 }

@@ -86,7 +86,7 @@ Driven by the **orchestrator-service** which polls the job-queue and calls each 
 
 | Port | Service | Endpoint |
 |------|---------|----------|
-| 3190 | api-gateway | GET/POST /jobs, GET /jobs/:id, GET /jobs/:id/detail, GET /jobs/:id/events |
+| 3190 | api-gateway | GET/POST /jobs, GET/DELETE /jobs/:id, GET /jobs/:id/detail, GET /jobs/:id/events, POST /jobs/:id/retry |
 | 3191 | planner-service | POST /plan |
 | 3192 | research-service | POST /research |
 | 3193 | script-service | POST /script |
