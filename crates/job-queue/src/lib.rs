@@ -19,6 +19,7 @@ pub struct QueueEntry {
     pub job_id: String,
     pub stage: String,
     pub enqueued_at: String,
+    pub attempts: u32,
 }
 
 /// Persists a FIFO work queue in SQLite.
@@ -58,7 +59,8 @@ impl JobQueue {
                 job_id      TEXT NOT NULL,
                 stage       TEXT NOT NULL,
                 enqueued_at TEXT NOT NULL,
-                claimed     INTEGER NOT NULL DEFAULT 0
+                claimed     INTEGER NOT NULL DEFAULT 0,
+                attempts    INTEGER NOT NULL DEFAULT 0
             );",
         )?;
         Ok(())
@@ -78,7 +80,7 @@ impl JobQueue {
     pub async fn dequeue(&self) -> Result<Option<QueueEntry>> {
         let conn = self.conn.lock().expect("lock poisoned");
         let mut stmt = conn.prepare(
-            "SELECT entry_id, job_id, stage, enqueued_at
+            "SELECT entry_id, job_id, stage, enqueued_at, attempts
              FROM queue WHERE claimed = 0
              ORDER BY entry_id ASC LIMIT 1",
         )?;
@@ -90,6 +92,7 @@ impl JobQueue {
                     job_id: row.get(1)?,
                     stage: row.get(2)?,
                     enqueued_at: row.get(3)?,
+                    attempts: row.get::<_, u32>(4)?,
                 })
             })?
             .next()
@@ -112,11 +115,11 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Return a claimed entry to the queue so it can be retried later.
+    /// Return a claimed entry to the queue for retry, incrementing its attempt counter.
     pub async fn nack(&self, entry_id: i64) -> Result<()> {
         let conn = self.conn.lock().expect("lock poisoned");
         conn.execute(
-            "UPDATE queue SET claimed = 0 WHERE entry_id = ?1",
+            "UPDATE queue SET claimed = 0, attempts = attempts + 1 WHERE entry_id = ?1",
             [entry_id],
         )?;
         Ok(())
@@ -194,14 +197,20 @@ mod tests {
         q.enqueue("job-1", "Planning").await.unwrap();
 
         let entry = q.dequeue().await.unwrap().unwrap();
-        // Entry is claimed, queue appears empty
+        assert_eq!(entry.attempts, 0);
         assert!(q.dequeue().await.unwrap().is_none());
 
-        // Nack returns it to the queue
+        // Nack returns it to the queue and increments attempts
         q.nack(entry.entry_id).await.unwrap();
         let retry = q.dequeue().await.unwrap().unwrap();
         assert_eq!(retry.job_id, "job-1");
         assert_eq!(retry.entry_id, entry.entry_id);
+        assert_eq!(retry.attempts, 1);
+
+        // Second nack increments again
+        q.nack(retry.entry_id).await.unwrap();
+        let retry2 = q.dequeue().await.unwrap().unwrap();
+        assert_eq!(retry2.attempts, 2);
     }
 
     #[tokio::test]

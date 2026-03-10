@@ -193,6 +193,12 @@ async fn poll_loop(state: AppState) {
             .unwrap_or(15),
     );
 
+    // Max retry attempts before marking a job as permanently failed.
+    let max_attempts: u32 = std::env::var("MAX_RETRY_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+
     loop {
         match state.queue.dequeue().await {
             Ok(Some(entry)) => {
@@ -231,27 +237,47 @@ async fn poll_loop(state: AppState) {
                         }
                     }
                     DispatchOutcome::ServiceUnavailable(reason) => {
-                        warn!(
-                            job_id = %entry.job_id,
-                            stage = %entry.stage,
-                            reason = %reason,
-                            "service unavailable, holding job pending"
-                        );
-                        // Mark job as Pending so the UI reflects the wait.
-                        let current_stage: Option<Stage> =
-                            serde_json::from_str(&format!("\"{}\"", entry.stage)).ok();
-                        if let Some(stage) = current_stage {
-                            let _ = state
+                        if entry.attempts >= max_attempts {
+                            error!(
+                                job_id = %entry.job_id,
+                                stage = %entry.stage,
+                                attempts = entry.attempts,
+                                "max retry attempts reached, marking job Failed"
+                            );
+                            if let Err(e) = state
                                 .store
-                                .update_job_status(&entry.job_id, &JobStatus::Pending, &stage)
-                                .await;
+                                .update_job_status(
+                                    &entry.job_id,
+                                    &JobStatus::Failed,
+                                    &Stage::Failed,
+                                )
+                                .await
+                            {
+                                error!(error = %e, "failed to update job status");
+                            }
+                            let _ = state.queue.acknowledge(entry.entry_id).await;
+                        } else {
+                            warn!(
+                                job_id = %entry.job_id,
+                                stage = %entry.stage,
+                                attempts = entry.attempts,
+                                max_attempts,
+                                reason = %reason,
+                                "service unavailable, holding job pending"
+                            );
+                            let current_stage: Option<Stage> =
+                                serde_json::from_str(&format!("\"{}\"", entry.stage)).ok();
+                            if let Some(stage) = current_stage {
+                                let _ = state
+                                    .store
+                                    .update_job_status(&entry.job_id, &JobStatus::Pending, &stage)
+                                    .await;
+                            }
+                            if let Err(e) = state.queue.nack(entry.entry_id).await {
+                                error!(error = %e, "failed to nack queue entry");
+                            }
+                            tokio::time::sleep(unavailable_backoff).await;
                         }
-                        // Nack: return the entry to the queue for retry.
-                        if let Err(e) = state.queue.nack(entry.entry_id).await {
-                            error!(error = %e, "failed to nack queue entry");
-                        }
-                        // Back off before polling again.
-                        tokio::time::sleep(unavailable_backoff).await;
                     }
                     DispatchOutcome::Failed(reason) => {
                         error!(

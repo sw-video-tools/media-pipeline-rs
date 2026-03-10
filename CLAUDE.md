@@ -111,7 +111,9 @@ Every service follows: async tokio main → `telemetry::init()` → Axum router 
 
 Downstream services share GPU resources on a LAN host. Only one service may be active at a time, and which service is running changes over time. The orchestrator enforces:
 - **Sequential dispatch**: one service call at a time, fully awaited before the next
+- **Pre-flight health check**: GETs `/healthz` before building requests; catches down services without wasted work
 - **Graceful unavailability**: connection refused or timeout → hold job as `Pending`, retry on next poll cycle (not `Failed`)
+- **Retry with max attempts**: after `MAX_RETRY_ATTEMPTS` (default 50) consecutive failures, job is marked `Failed`. Queue entries track attempt count.
 - **Connect timeout**: 5s connect timeout catches down services quickly; 300s request timeout allows long GPU operations
 - **Configurable backoff**: `UNAVAILABLE_BACKOFF_SECS` (default 15) controls retry delay when services are down; `POLL_INTERVAL_SECS` (default 5) controls idle polling
 
