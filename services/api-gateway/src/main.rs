@@ -10,71 +10,30 @@
 //! - DELETE /jobs/:id      — remove a job and its data
 //! - GET  /healthz    — health check
 
+mod errors;
+mod extract;
+mod handlers;
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use artifact_store::ArtifactStore;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::Router;
 use axum::routing::{get, post};
-use axum::{Json, Router};
-use chrono::Utc;
 use job_queue::JobQueue;
-use pipeline_types::{JobStatus, PipelineJob, PipelineJobRequest, Stage};
-use serde::Serialize;
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tracing::info;
-use uuid::Uuid;
 
-/// Structured error response returned as JSON.
-#[derive(Debug, Serialize)]
-struct ApiError {
-    code: u16,
-    error: String,
-}
-
-impl ApiError {
-    fn bad_request(msg: impl Into<String>) -> Self {
-        Self {
-            code: 400,
-            error: msg.into(),
-        }
-    }
-
-    fn not_found(msg: impl Into<String>) -> Self {
-        Self {
-            code: 404,
-            error: msg.into(),
-        }
-    }
-
-    fn conflict(msg: impl Into<String>) -> Self {
-        Self {
-            code: 409,
-            error: msg.into(),
-        }
-    }
-
-    fn internal(msg: impl Into<String>) -> Self {
-        Self {
-            code: 500,
-            error: msg.into(),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> axum::response::Response {
-        let status = StatusCode::from_u16(self.code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(self)).into_response()
-    }
-}
+use crate::handlers::{
+    create_job, delete_job, get_job, get_job_detail, get_job_events, healthz, list_jobs, retry_job,
+};
 
 #[derive(Clone)]
-struct AppState {
-    store: Arc<ArtifactStore>,
-    queue: Arc<JobQueue>,
+pub struct AppState {
+    pub store: Arc<ArtifactStore>,
+    pub queue: Arc<JobQueue>,
 }
 
 #[tokio::main]
@@ -97,14 +56,7 @@ async fn main() -> anyhow::Result<()> {
         queue: Arc::new(JobQueue::open(&queue_path)?),
     };
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/jobs", get(list_jobs).post(create_job))
-        .route("/jobs/{id}", get(get_job).delete(delete_job))
-        .route("/jobs/{id}/detail", get(get_job_detail))
-        .route("/jobs/{id}/events", get(get_job_events))
-        .route("/jobs/{id}/retry", post(retry_job))
-        .with_state(state);
+    let app = app(state);
 
     let addr: SocketAddr = std::env::var("API_BIND")
         .unwrap_or_else(|_| "0.0.0.0:3190".into())
@@ -115,205 +67,32 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn healthz() -> &'static str {
-    "ok"
-}
+fn app(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
 
-fn validate_request(req: &PipelineJobRequest) -> Result<(), ApiError> {
-    let title = req.title.trim();
-    if title.is_empty() {
-        return Err(ApiError::bad_request("title must not be empty"));
-    }
-    if title.len() > 200 {
-        return Err(ApiError::bad_request(
-            "title must be 200 characters or fewer",
-        ));
-    }
-    if req.idea.trim().is_empty() {
-        return Err(ApiError::bad_request("idea must not be empty"));
-    }
-    if req.audience.trim().is_empty() {
-        return Err(ApiError::bad_request("audience must not be empty"));
-    }
-    if req.tone.trim().is_empty() {
-        return Err(ApiError::bad_request("tone must not be empty"));
-    }
-    if req.target_duration_seconds == 0 {
-        return Err(ApiError::bad_request(
-            "target_duration_seconds must be greater than 0",
-        ));
-    }
-    if req.target_duration_seconds > 3600 {
-        return Err(ApiError::bad_request(
-            "target_duration_seconds must be 3600 or fewer",
-        ));
-    }
-    Ok(())
-}
-
-async fn create_job(
-    State(state): State<AppState>,
-    Json(req): Json<PipelineJobRequest>,
-) -> Result<(StatusCode, Json<PipelineJob>), ApiError> {
-    validate_request(&req)?;
-
-    let job = PipelineJob {
-        job_id: Uuid::new_v4().to_string(),
-        submitted_at: Utc::now(),
-        status: JobStatus::Queued,
-        current_stage: Stage::Planning,
-        request: req,
-    };
-
-    state
-        .store
-        .save_job(&job)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to save job: {e}")))?;
-    state
-        .queue
-        .enqueue(&job.job_id, "Planning")
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to enqueue job: {e}")))?;
-
-    info!(job_id = %job.job_id, "job created");
-    Ok((StatusCode::CREATED, Json(job)))
-}
-
-async fn list_jobs(State(state): State<AppState>) -> Result<Json<Vec<PipelineJob>>, ApiError> {
-    let jobs = state
-        .store
-        .list_jobs()
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to list jobs: {e}")))?;
-    Ok(Json(jobs))
-}
-
-async fn get_job(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<PipelineJob>, ApiError> {
-    let job = state
-        .store
-        .get_job(&id)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to get job: {e}")))?
-        .ok_or_else(|| ApiError::not_found(format!("job '{id}' not found")))?;
-    Ok(Json(job))
-}
-
-/// Enriched job detail with completed stage outputs.
-#[derive(Debug, Serialize)]
-struct JobDetail {
-    #[serde(flatten)]
-    job: PipelineJob,
-    completed_stages: Vec<String>,
-    stage_outputs: serde_json::Value,
-}
-
-async fn get_job_detail(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<JobDetail>, ApiError> {
-    let job = state
-        .store
-        .get_job(&id)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to get job: {e}")))?
-        .ok_or_else(|| ApiError::not_found(format!("job '{id}' not found")))?;
-
-    let outputs = state
-        .store
-        .list_stage_outputs(&id)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to list stage outputs: {e}")))?;
-
-    let completed_stages: Vec<String> = outputs.iter().map(|(s, _)| s.clone()).collect();
-    let stage_outputs: serde_json::Map<String, serde_json::Value> = outputs.into_iter().collect();
-
-    Ok(Json(JobDetail {
-        job,
-        completed_stages,
-        stage_outputs: serde_json::Value::Object(stage_outputs),
-    }))
-}
-
-async fn get_job_events(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<Vec<artifact_store::JobEvent>>, ApiError> {
-    let events = state
-        .store
-        .list_events(&id)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to list events: {e}")))?;
-    Ok(Json(events))
-}
-
-async fn retry_job(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    let job = state
-        .store
-        .get_job(&id)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to get job: {e}")))?
-        .ok_or_else(|| ApiError::not_found(format!("job '{id}' not found")))?;
-
-    if !matches!(job.status, JobStatus::Failed) {
-        return Err(ApiError::conflict(format!(
-            "job '{id}' is {} — only failed jobs can be retried",
-            job.status,
-        )));
-    }
-
-    // Reset to Queued and re-enqueue at the failed stage.
-    let stage_str = job.current_stage.to_string();
-    state
-        .store
-        .update_job_status(&id, &JobStatus::Queued, &job.current_stage)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to update job status: {e}")))?;
-    state
-        .queue
-        .enqueue(&id, &stage_str)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to enqueue job: {e}")))?;
-
-    info!(job_id = %id, stage = %stage_str, "job retried");
-    Ok(StatusCode::OK)
-}
-
-async fn delete_job(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, ApiError> {
-    // Remove queue entries first, then the job data.
-    state
-        .queue
-        .remove_by_job_id(&id)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to remove queue entries: {e}")))?;
-    let deleted = state
-        .store
-        .delete_job(&id)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to delete job: {e}")))?;
-
-    if deleted {
-        info!(job_id = %id, "job deleted");
-        Ok(StatusCode::OK)
-    } else {
-        Err(ApiError::not_found(format!("job '{id}' not found")))
-    }
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/jobs", get(list_jobs).post(create_job))
+        .route("/jobs/{id}", get(get_job).delete(delete_job))
+        .route("/jobs/{id}/detail", get(get_job_detail))
+        .route("/jobs/{id}/events", get(get_job_events))
+        .route("/jobs/{id}/retry", post(retry_job))
+        .layer(cors)
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1 MiB
+        .with_state(state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::validate_request;
     use axum::body::Body;
     use axum::http::Request;
+    use chrono::Utc;
+    use pipeline_types::{JobStatus, PipelineJob, PipelineJobRequest, Stage};
     use tower::ServiceExt;
 
     fn test_state() -> AppState {
@@ -324,14 +103,7 @@ mod tests {
     }
 
     fn test_app() -> Router {
-        Router::new()
-            .route("/healthz", get(healthz))
-            .route("/jobs", get(list_jobs).post(create_job))
-            .route("/jobs/{id}", get(get_job).delete(delete_job))
-            .route("/jobs/{id}/detail", get(get_job_detail))
-            .route("/jobs/{id}/events", get(get_job_events))
-            .route("/jobs/{id}/retry", post(retry_job))
-            .with_state(test_state())
+        app(test_state())
     }
 
     #[tokio::test]
@@ -346,11 +118,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_get_job() {
-        let state = test_state();
-        let app = Router::new()
-            .route("/jobs", get(list_jobs).post(create_job))
-            .route("/jobs/{id}", get(get_job))
-            .with_state(state);
+        let app = test_app();
 
         // Create a job
         let body = serde_json::json!({
@@ -445,9 +213,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = Router::new()
-            .route("/jobs/{id}/detail", get(get_job_detail))
-            .with_state(state);
+        let app = app(state);
 
         let resp = app
             .oneshot(
@@ -502,9 +268,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = Router::new()
-            .route("/jobs/{id}/events", get(get_job_events))
-            .with_state(state);
+        let app = app(state);
 
         let resp = app
             .oneshot(
@@ -547,9 +311,7 @@ mod tests {
         };
         state.store.save_job(&job).await.unwrap();
 
-        let app = Router::new()
-            .route("/jobs/{id}/retry", post(retry_job))
-            .with_state(state.clone());
+        let app = app(state.clone());
 
         let resp = app
             .oneshot(
@@ -589,9 +351,7 @@ mod tests {
         };
         state.store.save_job(&job).await.unwrap();
 
-        let app = Router::new()
-            .route("/jobs/{id}/retry", post(retry_job))
-            .with_state(state);
+        let app = app(state);
 
         let resp = app
             .oneshot(
@@ -629,9 +389,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = Router::new()
-            .route("/jobs/{id}", get(get_job).delete(delete_job))
-            .with_state(state.clone());
+        let app = app(state.clone());
 
         let resp = app
             .clone()
@@ -702,9 +460,7 @@ mod tests {
         };
         state.store.save_job(&job).await.unwrap();
 
-        let app = Router::new()
-            .route("/jobs/{id}/retry", post(retry_job))
-            .with_state(state);
+        let app = app(state);
 
         let resp = app
             .oneshot(
@@ -724,6 +480,30 @@ mod tests {
         .unwrap();
         assert_eq!(body["code"], 409);
         assert!(body["error"].as_str().unwrap().contains("Running"));
+    }
+
+    #[tokio::test]
+    async fn malformed_json_returns_400_with_json_error() {
+        let app = test_app();
+        let resp = app
+            .oneshot(
+                Request::post("/jobs")
+                    .header("content-type", "application/json")
+                    .body(Body::from(b"not json".to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["code"], 400);
+        assert!(body["error"].as_str().unwrap().contains("invalid JSON"));
     }
 
     #[test]
@@ -793,19 +573,12 @@ mod tests {
     #[tokio::test]
     async fn http_lifecycle() {
         let state = test_state();
-        let app = Router::new()
-            .route("/healthz", get(healthz))
-            .route("/jobs", get(list_jobs).post(create_job))
-            .route("/jobs/{id}", get(get_job).delete(delete_job))
-            .route("/jobs/{id}/detail", get(get_job_detail))
-            .route("/jobs/{id}/events", get(get_job_events))
-            .route("/jobs/{id}/retry", post(retry_job))
-            .with_state(state.clone());
+        let test_app = app(state.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, test_app).await.unwrap();
         });
 
         let base = format!("http://{addr}");

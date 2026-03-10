@@ -1,9 +1,118 @@
 services:
   api-gateway:
-    image: rust:latest
-    working_dir: /workspace
-    command: bash -lc "cargo run -p api-gateway"
-    volumes:
-      - ./:/workspace
+    build: .
+    command: ["/app/api-gateway"]
     ports:
       - "3190:3190"
+    environment:
+      - RUST_LOG=info
+      - SQLITE_DB=/data/pipeline.db
+      - QUEUE_DB=/data/queue.db
+      - API_BIND=0.0.0.0:3190
+    volumes:
+      - pipeline-data:/data
+
+  orchestrator:
+    build: .
+    command: ["/app/orchestrator-service"]
+    environment:
+      - RUST_LOG=info
+      - SQLITE_DB=/data/pipeline.db
+      - QUEUE_DB=/data/queue.db
+      - ORCHESTRATOR_BIND=0.0.0.0:3199
+      - PLANNER_URL=http://planner:3191
+      - RESEARCH_URL=http://research:3192
+      - SCRIPT_URL=http://script:3193
+      - TTS_URL=http://tts:3194
+      - ASR_URL=http://asr-validation:3195
+      - CAPTIONS_URL=http://captions:3196
+      - RENDER_URL=http://render:3197
+      - QA_URL=http://qa:3198
+    ports:
+      - "3199:3199"
+    volumes:
+      - pipeline-data:/data
+    depends_on:
+      - planner
+      - research
+      - script
+      - tts
+      - asr-validation
+      - captions
+      - render
+      - qa
+
+  planner:
+    build: .
+    command: ["/app/planner-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3191
+    ports:
+      - "3191:3191"
+
+  research:
+    build: .
+    command: ["/app/research-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3192
+    ports:
+      - "3192:3192"
+
+  script:
+    build: .
+    command: ["/app/script-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3193
+    ports:
+      - "3193:3193"
+
+  tts:
+    build: .
+    command: ["/app/tts-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3194
+    ports:
+      - "3194:3194"
+
+  asr-validation:
+    build: .
+    command: ["/app/asr-validation-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3195
+    ports:
+      - "3195:3195"
+
+  captions:
+    build: .
+    command: ["/app/captions-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3196
+    ports:
+      - "3196:3196"
+
+  render:
+    build: .
+    command: ["/app/render-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3197
+    ports:
+      - "3197:3197"
+
+  qa:
+    build: .
+    command: ["/app/qa-service"]
+    environment:
+      - RUST_LOG=info
+      - BIND=0.0.0.0:3198
+    ports:
+      - "3198:3198"
+
+volumes:
+  pipeline-data:
