@@ -496,7 +496,26 @@ async fn build_stage_request(
                     "narration_tone": job.request.tone,
                 })
             });
-            Ok(serde_json::json!({ "plan": plan_body }))
+
+            // Include research output so the script has factual context.
+            let research = store
+                .get_stage_output(job_id, "Research")
+                .await
+                .ok()
+                .flatten();
+            let research_packets = research
+                .as_ref()
+                .and_then(|r| r["packets"].as_array().cloned())
+                .or_else(|| {
+                    // The research service may return a single packet at top level.
+                    research.clone().map(|r| vec![r])
+                })
+                .unwrap_or_default();
+
+            Ok(serde_json::json!({
+                "plan": plan_body,
+                "research": research_packets,
+            }))
         }
         "Tts" => {
             // Use script output if available.
@@ -700,6 +719,28 @@ mod tests {
         let job = sample_job();
         let body = build_stage_request("QaFinal", &job, &store).await.unwrap();
         assert_eq!(body["output_path"], "/custom/path.mp4");
+    }
+
+    #[tokio::test]
+    async fn build_script_includes_research() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let research_output = serde_json::json!({
+            "job_id": "test-1",
+            "query": "test overview",
+            "facts": [{"claim": "Rust is fast", "source": "rust-lang.org", "confidence": 0.95}],
+            "summary": "Rust performance",
+        });
+        store
+            .save_stage_output("test-1", "Research", &research_output)
+            .await
+            .unwrap();
+
+        let job = sample_job();
+        let body = build_stage_request("Script", &job, &store).await.unwrap();
+        assert!(body["plan"].is_object());
+        let research = body["research"].as_array().unwrap();
+        assert!(!research.is_empty());
+        assert_eq!(research[0]["facts"][0]["claim"], "Rust is fast");
     }
 
     #[tokio::test]
