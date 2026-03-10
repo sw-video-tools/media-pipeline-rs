@@ -61,6 +61,11 @@ impl ServiceRegistry {
         Self { urls }
     }
 
+    #[cfg(test)]
+    fn from_map(urls: HashMap<String, String>) -> Self {
+        Self { urls }
+    }
+
     fn endpoint_for(&self, stage: &str) -> Option<String> {
         let base = self.urls.get(stage)?;
         let path = stage_to_path(stage);
@@ -273,6 +278,7 @@ async fn poll_loop(state: AppState) {
 }
 
 /// Outcome of a stage dispatch attempt.
+#[derive(Debug)]
 enum DispatchOutcome {
     /// Stage completed; contains the next stage (if any).
     Ok(Option<Stage>),
@@ -365,6 +371,11 @@ async fn dispatch_stage(
 
     // Update job status
     let status_result = match &next {
+        Some(Stage::Complete) => {
+            store
+                .update_job_status(job_id, &JobStatus::Completed, &Stage::Complete)
+                .await
+        }
         Some(next_stage) => {
             store
                 .update_job_status(job_id, &JobStatus::Running, next_stage)
@@ -380,6 +391,9 @@ async fn dispatch_stage(
             }
         }
     };
+
+    // Don't enqueue terminal stages — signal completion by returning None.
+    let next = next.filter(|s| !matches!(s, Stage::Complete | Stage::Failed));
 
     if let Err(e) = status_result {
         return DispatchOutcome::Failed(format!("failed to update job status: {e}"));
@@ -704,6 +718,174 @@ mod tests {
                 must_include: vec![],
                 must_avoid: vec![],
             },
+        }
+    }
+
+    /// Mock handler that echoes back a success response with a job_id.
+    async fn mock_stage_handler(
+        axum::Json(body): axum::Json<serde_json::Value>,
+    ) -> axum::Json<serde_json::Value> {
+        let job_id = body
+            .get("job_id")
+            .or_else(|| body.get("plan").and_then(|p| p.get("job_id")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        axum::Json(serde_json::json!({
+            "job_id": job_id,
+            "status": "ok",
+        }))
+    }
+
+    /// Spawn a mock service with all stage endpoints on an ephemeral port.
+    /// Returns the base URL (e.g. "http://127.0.0.1:XXXXX").
+    async fn spawn_mock_service() -> String {
+        use axum::routing::post;
+
+        let app = Router::new()
+            .route("/plan", post(mock_stage_handler))
+            .route("/research", post(mock_stage_handler))
+            .route("/script", post(mock_stage_handler))
+            .route("/tts", post(mock_stage_handler))
+            .route("/validate", post(mock_stage_handler))
+            .route("/captions", post(mock_stage_handler))
+            .route("/render", post(mock_stage_handler))
+            .route("/qa", post(mock_stage_handler));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn mock_registry(base_url: &str) -> ServiceRegistry {
+        let stages = [
+            "Planning",
+            "Research",
+            "Script",
+            "Tts",
+            "AsrValidation",
+            "Captions",
+            "RenderFinal",
+            "QaFinal",
+        ];
+        let urls: HashMap<String, String> = stages
+            .into_iter()
+            .map(|s| (s.into(), base_url.into()))
+            .collect();
+        ServiceRegistry::from_map(urls)
+    }
+
+    #[tokio::test]
+    async fn dispatch_stage_success() {
+        let base_url = spawn_mock_service().await;
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let registry = mock_registry(&base_url);
+        let http = reqwest::Client::new();
+        let job = sample_job();
+        store.save_job(&job).await.unwrap();
+
+        let outcome = dispatch_stage(&http, &registry, &store, "test-1", "Planning").await;
+        assert!(
+            matches!(outcome, DispatchOutcome::Ok(Some(Stage::Research))),
+            "expected Ok(Research), got {outcome:?}"
+        );
+
+        // Verify stage output was saved
+        let output = store.get_stage_output("test-1", "Planning").await.unwrap();
+        assert!(output.is_some());
+    }
+
+    #[tokio::test]
+    async fn dispatch_stage_service_unavailable() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        // Point to a port where nothing is listening
+        let urls: HashMap<String, String> =
+            [("Planning".into(), "http://127.0.0.1:1".into())].into();
+        let registry = ServiceRegistry::from_map(urls);
+        let http = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(100))
+            .build()
+            .unwrap();
+        let job = sample_job();
+        store.save_job(&job).await.unwrap();
+
+        let outcome = dispatch_stage(&http, &registry, &store, "test-1", "Planning").await;
+        assert!(
+            matches!(outcome, DispatchOutcome::ServiceUnavailable(_)),
+            "expected ServiceUnavailable, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_pipeline_with_mock_services() {
+        let base_url = spawn_mock_service().await;
+        let store = Arc::new(ArtifactStore::open_in_memory().unwrap());
+        let queue = Arc::new(JobQueue::open_in_memory().unwrap());
+        let registry = mock_registry(&base_url);
+        let http = reqwest::Client::new();
+
+        // Save job and enqueue first stage
+        let job = sample_job();
+        store.save_job(&job).await.unwrap();
+        queue.enqueue("test-1", "Planning").await.unwrap();
+
+        // Process all stages sequentially
+        let mvp_stages = [
+            "Planning",
+            "Research",
+            "Script",
+            "Tts",
+            "AsrValidation",
+            "Captions",
+            "RenderFinal",
+            "QaFinal",
+        ];
+
+        for expected_stage in &mvp_stages {
+            let entry = queue
+                .dequeue()
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("expected queue entry for {expected_stage}"));
+            assert_eq!(&entry.stage, expected_stage);
+
+            let outcome =
+                dispatch_stage(&http, &registry, &store, &entry.job_id, &entry.stage).await;
+
+            match outcome {
+                DispatchOutcome::Ok(next) => {
+                    queue.acknowledge(entry.entry_id).await.unwrap();
+                    if let Some(next_stage) = next {
+                        let next_str = next_stage.to_string();
+                        queue.enqueue(&entry.job_id, &next_str).await.unwrap();
+                    }
+                }
+                other => panic!("stage {expected_stage} failed: {other:?}"),
+            }
+        }
+
+        // Verify final job status
+        let final_job = store.get_job("test-1").await.unwrap().unwrap();
+        assert!(
+            matches!(final_job.status, JobStatus::Completed),
+            "expected Completed, got {}",
+            final_job.status
+        );
+        assert!(
+            matches!(final_job.current_stage, Stage::Complete),
+            "expected Complete, got {}",
+            final_job.current_stage
+        );
+
+        // Verify queue is empty
+        assert!(queue.dequeue().await.unwrap().is_none());
+
+        // Verify all stage outputs were saved
+        for stage in &mvp_stages {
+            let output = store.get_stage_output("test-1", stage).await.unwrap();
+            assert!(output.is_some(), "missing output for stage {stage}");
         }
     }
 }
