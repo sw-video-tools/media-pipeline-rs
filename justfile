@@ -69,5 +69,8 @@ status JOB_ID:
 detail JOB_ID:
     cargo run -p operator-cli -- detail {{JOB_ID}}
 
+logs JOB_ID:
+    cargo run -p operator-cli -- logs {{JOB_ID}}
+
 list-jobs:
     cargo run -p operator-cli -- list

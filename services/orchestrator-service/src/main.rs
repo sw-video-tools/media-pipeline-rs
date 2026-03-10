@@ -207,6 +207,14 @@ async fn poll_loop(state: AppState) {
                     stage = %entry.stage,
                     "processing queue entry"
                 );
+                let _ = state
+                    .store
+                    .append_event(
+                        &entry.job_id,
+                        "info",
+                        &format!("dispatching stage {}", entry.stage),
+                    )
+                    .await;
 
                 // Sequential dispatch — one at a time, awaited to completion.
                 let outcome = dispatch_stage(
@@ -220,6 +228,14 @@ async fn poll_loop(state: AppState) {
 
                 match outcome {
                     DispatchOutcome::Ok(next_stage) => {
+                        let _ = state
+                            .store
+                            .append_event(
+                                &entry.job_id,
+                                "info",
+                                &format!("stage {} completed", entry.stage),
+                            )
+                            .await;
                         if let Err(e) = state.queue.acknowledge(entry.entry_id).await {
                             error!(error = %e, "failed to acknowledge queue entry");
                         }
@@ -237,6 +253,19 @@ async fn poll_loop(state: AppState) {
                         }
                     }
                     DispatchOutcome::ServiceUnavailable(reason) => {
+                        let _ = state
+                            .store
+                            .append_event(
+                                &entry.job_id,
+                                "warn",
+                                &format!(
+                                    "stage {} service unavailable (attempt {}): {}",
+                                    entry.stage,
+                                    entry.attempts + 1,
+                                    reason,
+                                ),
+                            )
+                            .await;
                         if entry.attempts >= max_attempts {
                             error!(
                                 job_id = %entry.job_id,
@@ -280,6 +309,14 @@ async fn poll_loop(state: AppState) {
                         }
                     }
                     DispatchOutcome::Failed(reason) => {
+                        let _ = state
+                            .store
+                            .append_event(
+                                &entry.job_id,
+                                "error",
+                                &format!("stage {} failed: {reason}", entry.stage),
+                            )
+                            .await;
                         error!(
                             job_id = %entry.job_id,
                             stage = %entry.stage,

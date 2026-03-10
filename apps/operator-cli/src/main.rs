@@ -4,6 +4,7 @@
 //!   operator-cli submit <file.json>
 //!   operator-cli status <job-id>
 //!   operator-cli detail <job-id>
+//!   operator-cli logs  <job-id>
 //!   operator-cli list
 
 use anyhow::{Context, Result};
@@ -29,6 +30,8 @@ enum Command {
     Status { job_id: String },
     /// Show detailed job info including stage outputs
     Detail { job_id: String },
+    /// Show event log for a job
+    Logs { job_id: String },
     /// List all jobs
     List,
 }
@@ -42,6 +45,7 @@ async fn main() -> Result<()> {
         Command::Submit { file } => submit_job(&client, &cli.api_url, &file).await?,
         Command::Status { job_id } => get_status(&client, &cli.api_url, &job_id).await?,
         Command::Detail { job_id } => get_detail(&client, &cli.api_url, &job_id).await?,
+        Command::Logs { job_id } => get_logs(&client, &cli.api_url, &job_id).await?,
         Command::List => list_jobs(&client, &cli.api_url).await?,
     }
 
@@ -160,6 +164,41 @@ async fn get_detail(client: &reqwest::Client, api_url: &str, job_id: &str) -> Re
     Ok(())
 }
 
+async fn get_logs(client: &reqwest::Client, api_url: &str, job_id: &str) -> Result<()> {
+    let resp = client
+        .get(format!("{api_url}/jobs/{job_id}/events"))
+        .send()
+        .await
+        .context("failed to connect to API gateway")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("API returned {status}");
+    }
+
+    let events: Vec<serde_json::Value> = resp.json().await.context("failed to parse response")?;
+
+    if events.is_empty() {
+        println!("No events recorded for job '{job_id}'.");
+        return Ok(());
+    }
+
+    for event in &events {
+        let ts = event["timestamp"].as_str().unwrap_or("?");
+        let level = event["level"].as_str().unwrap_or("?");
+        let msg = event["message"].as_str().unwrap_or("?");
+        let level_tag = match level {
+            "error" => "ERR ",
+            "warn" => "WARN",
+            _ => "INFO",
+        };
+        println!("{ts}  [{level_tag}]  {msg}");
+    }
+    println!("\n{} event(s)", events.len());
+
+    Ok(())
+}
+
 async fn list_jobs(client: &reqwest::Client, api_url: &str) -> Result<()> {
     let resp = client
         .get(format!("{api_url}/jobs"))
@@ -229,6 +268,12 @@ mod tests {
     #[test]
     fn cli_parses_detail() {
         let cli = Cli::try_parse_from(["operator-cli", "detail", "job-123"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_logs() {
+        let cli = Cli::try_parse_from(["operator-cli", "logs", "job-123"]);
         assert!(cli.is_ok());
     }
 }

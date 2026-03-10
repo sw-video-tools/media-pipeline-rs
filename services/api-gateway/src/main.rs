@@ -4,6 +4,8 @@
 //! - POST /jobs       — create a new pipeline job
 //! - GET  /jobs       — list all jobs
 //! - GET  /jobs/:id   — get a single job by ID
+//! - GET  /jobs/:id/detail  — enriched job with stage outputs
+//! - GET  /jobs/:id/events  — job event log
 //! - GET  /healthz    — health check
 
 use std::net::SocketAddr;
@@ -53,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/jobs", get(list_jobs).post(create_job))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/detail", get(get_job_detail))
+        .route("/jobs/{id}/events", get(get_job_events))
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("API_BIND")
@@ -153,6 +156,18 @@ async fn get_job_detail(
     }))
 }
 
+async fn get_job_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<artifact_store::JobEvent>>, StatusCode> {
+    let events = state
+        .store
+        .list_events(&id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(events))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +188,7 @@ mod tests {
             .route("/jobs", get(list_jobs).post(create_job))
             .route("/jobs/{id}", get(get_job))
             .route("/jobs/{id}/detail", get(get_job_detail))
+            .route("/jobs/{id}/events", get(get_job_events))
             .with_state(test_state())
     }
 
@@ -328,5 +344,44 @@ mod tests {
         )
         .unwrap();
         assert!(jobs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_job_events_returns_log() {
+        let state = test_state();
+        state
+            .store
+            .append_event("evt-1", "info", "dispatching stage Planning")
+            .await
+            .unwrap();
+        state
+            .store
+            .append_event("evt-1", "info", "stage Planning completed")
+            .await
+            .unwrap();
+
+        let app = Router::new()
+            .route("/jobs/{id}/events", get(get_job_events))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/jobs/evt-1/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let events: Vec<serde_json::Value> = serde_json::from_slice(
+            &axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["level"], "info");
+        assert!(events[0]["message"].as_str().unwrap().contains("Planning"));
     }
 }

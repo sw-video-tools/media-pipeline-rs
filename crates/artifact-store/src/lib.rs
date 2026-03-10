@@ -9,6 +9,16 @@ use tracing::info;
 
 use pipeline_types::{JobStatus, PipelineJob, PipelineJobRequest, Stage};
 
+/// A timestamped event recorded for a pipeline job.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct JobEvent {
+    pub event_id: i64,
+    pub job_id: String,
+    pub timestamp: String,
+    pub level: String,
+    pub message: String,
+}
+
 /// Persists pipeline jobs in a local SQLite database.
 #[derive(Debug)]
 pub struct ArtifactStore {
@@ -54,6 +64,13 @@ impl ArtifactStore {
                 output_json TEXT NOT NULL,
                 created_at  TEXT NOT NULL,
                 PRIMARY KEY (job_id, stage)
+            );
+            CREATE TABLE IF NOT EXISTS job_events (
+                event_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id      TEXT NOT NULL,
+                timestamp   TEXT NOT NULL,
+                level       TEXT NOT NULL,
+                message     TEXT NOT NULL
             );",
         )?;
         Ok(())
@@ -166,6 +183,37 @@ impl ArtifactStore {
             })
             .collect();
         Ok(rows)
+    }
+
+    /// Append a timestamped event to a job's log.
+    pub async fn append_event(&self, job_id: &str, level: &str, message: &str) -> Result<()> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        conn.execute(
+            "INSERT INTO job_events (job_id, timestamp, level, message) VALUES (?1, ?2, ?3, ?4)",
+            (job_id, chrono::Utc::now().to_rfc3339(), level, message),
+        )?;
+        Ok(())
+    }
+
+    /// List all events for a job, oldest first.
+    pub async fn list_events(&self, job_id: &str) -> Result<Vec<JobEvent>> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        let mut stmt = conn.prepare(
+            "SELECT event_id, job_id, timestamp, level, message
+             FROM job_events WHERE job_id = ?1 ORDER BY event_id ASC",
+        )?;
+        let events: Vec<JobEvent> = stmt
+            .query_map([job_id], |row| {
+                Ok(JobEvent {
+                    event_id: row.get(0)?,
+                    job_id: row.get(1)?,
+                    timestamp: row.get(2)?,
+                    level: row.get(3)?,
+                    message: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(events)
     }
 
     /// Update a job's status and current stage.
@@ -354,6 +402,40 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fetched["version"], 2);
+    }
+
+    #[tokio::test]
+    async fn append_and_list_events() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        store
+            .append_event("j-1", "info", "dispatching Planning")
+            .await
+            .unwrap();
+        store
+            .append_event("j-1", "info", "Planning completed")
+            .await
+            .unwrap();
+        store
+            .append_event("j-2", "warn", "service unavailable")
+            .await
+            .unwrap();
+
+        let events = store.list_events("j-1").await.unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].level, "info");
+        assert!(events[0].message.contains("Planning"));
+        assert_eq!(events[1].message, "Planning completed");
+
+        // Different job's events don't leak
+        let events_j2 = store.list_events("j-2").await.unwrap();
+        assert_eq!(events_j2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_events_empty() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let events = store.list_events("nonexistent").await.unwrap();
+        assert!(events.is_empty());
     }
 
     #[tokio::test]
