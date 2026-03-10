@@ -995,9 +995,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "telemetry",
+ "pipeline-types",
+ "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
- "tracing",
 ]
 
 [[package]]
