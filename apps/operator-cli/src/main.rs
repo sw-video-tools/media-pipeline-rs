@@ -4,8 +4,11 @@
 //!   operator-cli submit <file.json>
 //!   operator-cli status <job-id>
 //!   operator-cli detail <job-id>
-//!   operator-cli logs  <job-id>
+//!   operator-cli logs   <job-id>
+//!   operator-cli retry  <job-id>
+//!   operator-cli delete <job-id>
 //!   operator-cli list
+//!   operator-cli health
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -32,8 +35,14 @@ enum Command {
     Detail { job_id: String },
     /// Show event log for a job
     Logs { job_id: String },
+    /// Retry a failed job from its current stage
+    Retry { job_id: String },
+    /// Delete a job and all its data
+    Delete { job_id: String },
     /// List all jobs
     List,
+    /// Show service health dashboard from orchestrator
+    Health,
 }
 
 #[tokio::main]
@@ -46,7 +55,10 @@ async fn main() -> Result<()> {
         Command::Status { job_id } => get_status(&client, &cli.api_url, &job_id).await?,
         Command::Detail { job_id } => get_detail(&client, &cli.api_url, &job_id).await?,
         Command::Logs { job_id } => get_logs(&client, &cli.api_url, &job_id).await?,
+        Command::Retry { job_id } => retry_job(&client, &cli.api_url, &job_id).await?,
+        Command::Delete { job_id } => delete_job(&client, &cli.api_url, &job_id).await?,
         Command::List => list_jobs(&client, &cli.api_url).await?,
+        Command::Health => show_health(&client).await?,
     }
 
     Ok(())
@@ -199,6 +211,86 @@ async fn get_logs(client: &reqwest::Client, api_url: &str, job_id: &str) -> Resu
     Ok(())
 }
 
+async fn retry_job(client: &reqwest::Client, api_url: &str, job_id: &str) -> Result<()> {
+    let resp = client
+        .post(format!("{api_url}/jobs/{job_id}/retry"))
+        .send()
+        .await
+        .context("failed to connect to API gateway")?;
+
+    match resp.status().as_u16() {
+        200 => println!("Job '{job_id}' re-enqueued for retry."),
+        404 => anyhow::bail!("Job '{job_id}' not found"),
+        409 => {
+            anyhow::bail!("Job '{job_id}' is not in Failed state — only failed jobs can be retried")
+        }
+        code => anyhow::bail!("API returned {code}"),
+    }
+    Ok(())
+}
+
+async fn delete_job(client: &reqwest::Client, api_url: &str, job_id: &str) -> Result<()> {
+    let resp = client
+        .delete(format!("{api_url}/jobs/{job_id}"))
+        .send()
+        .await
+        .context("failed to connect to API gateway")?;
+
+    match resp.status().as_u16() {
+        200 => println!("Job '{job_id}' deleted."),
+        404 => anyhow::bail!("Job '{job_id}' not found"),
+        code => anyhow::bail!("API returned {code}"),
+    }
+    Ok(())
+}
+
+async fn show_health(client: &reqwest::Client) -> Result<()> {
+    // The health dashboard is on the orchestrator (port 3199 by default).
+    // Derive orchestrator URL from api_url or use ORCHESTRATOR_URL env var.
+    let orchestrator_url =
+        std::env::var("ORCHESTRATOR_URL").unwrap_or_else(|_| "http://127.0.0.1:3199".into());
+
+    let resp = client
+        .get(format!("{orchestrator_url}/status"))
+        .send()
+        .await
+        .context("failed to connect to orchestrator")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        anyhow::bail!("Orchestrator returned {status}");
+    }
+
+    let status: serde_json::Value = resp.json().await.context("failed to parse response")?;
+
+    println!(
+        "Orchestrator: {} | Pending jobs: {}",
+        if status["running"].as_bool().unwrap_or(false) {
+            "running"
+        } else {
+            "stopped"
+        },
+        status["pending_jobs"].as_u64().unwrap_or(0),
+    );
+
+    if let Some(services) = status["services"].as_array() {
+        println!("\n{:<16} {:<8} URL", "SERVICE", "STATUS");
+        println!("{}", "-".repeat(70));
+        for svc in services {
+            let name = svc["name"].as_str().unwrap_or("?");
+            let healthy = svc["healthy"].as_bool().unwrap_or(false);
+            let url = svc["url"].as_str().unwrap_or("?");
+            let tag = if healthy { "UP" } else { "DOWN" };
+            println!("{:<16} {:<8} {url}", name, tag);
+            if let Some(err) = svc["error"].as_str() {
+                println!("{:<16} {err}", "");
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn list_jobs(client: &reqwest::Client, api_url: &str) -> Result<()> {
     let resp = client
         .get(format!("{api_url}/jobs"))
@@ -274,6 +366,24 @@ mod tests {
     #[test]
     fn cli_parses_logs() {
         let cli = Cli::try_parse_from(["operator-cli", "logs", "job-123"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_retry() {
+        let cli = Cli::try_parse_from(["operator-cli", "retry", "job-123"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_delete() {
+        let cli = Cli::try_parse_from(["operator-cli", "delete", "job-123"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_health() {
+        let cli = Cli::try_parse_from(["operator-cli", "health"]);
         assert!(cli.is_ok());
     }
 }

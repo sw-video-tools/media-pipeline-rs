@@ -22,8 +22,11 @@ cargo run -p <service-name>
 cargo run -p operator-cli -- submit jobs/sample-explainer.json
 cargo run -p operator-cli -- status <job-id>
 cargo run -p operator-cli -- detail <job-id>
-cargo run -p operator-cli -- logs  <job-id>
+cargo run -p operator-cli -- logs   <job-id>
+cargo run -p operator-cli -- retry  <job-id>
+cargo run -p operator-cli -- delete <job-id>
 cargo run -p operator-cli -- list
+cargo run -p operator-cli -- health
 
 # Tests
 cargo test                # all tests

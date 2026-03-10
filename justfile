@@ -72,5 +72,14 @@ detail JOB_ID:
 logs JOB_ID:
     cargo run -p operator-cli -- logs {{JOB_ID}}
 
+retry JOB_ID:
+    cargo run -p operator-cli -- retry {{JOB_ID}}
+
+delete-job JOB_ID:
+    cargo run -p operator-cli -- delete {{JOB_ID}}
+
 list-jobs:
     cargo run -p operator-cli -- list
+
+health:
+    cargo run -p operator-cli -- health
