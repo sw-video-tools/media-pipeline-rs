@@ -112,6 +112,16 @@ impl JobQueue {
         Ok(())
     }
 
+    /// Return a claimed entry to the queue so it can be retried later.
+    pub async fn nack(&self, entry_id: i64) -> Result<()> {
+        let conn = self.conn.lock().expect("lock poisoned");
+        conn.execute(
+            "UPDATE queue SET claimed = 0 WHERE entry_id = ?1",
+            [entry_id],
+        )?;
+        Ok(())
+    }
+
     /// Return the number of unclaimed entries.
     pub async fn pending_count(&self) -> Result<usize> {
         let conn = self.conn.lock().expect("lock poisoned");
@@ -176,6 +186,22 @@ mod tests {
         q.acknowledge(entry.entry_id).await.unwrap();
 
         assert_eq!(q.pending_count().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn nack_returns_entry_to_queue() {
+        let q = JobQueue::open_in_memory().unwrap();
+        q.enqueue("job-1", "Planning").await.unwrap();
+
+        let entry = q.dequeue().await.unwrap().unwrap();
+        // Entry is claimed, queue appears empty
+        assert!(q.dequeue().await.unwrap().is_none());
+
+        // Nack returns it to the queue
+        q.nack(entry.entry_id).await.unwrap();
+        let retry = q.dequeue().await.unwrap().unwrap();
+        assert_eq!(retry.job_id, "job-1");
+        assert_eq!(retry.entry_id, entry.entry_id);
     }
 
     #[tokio::test]

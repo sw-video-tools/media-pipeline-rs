@@ -101,9 +101,19 @@ Every service follows: async tokio main → `telemetry::init()` → Axum router 
 ### Data Flow
 
 1. **api-gateway** receives `POST /jobs`, saves to `artifact-store`, enqueues in `job-queue`
-2. **orchestrator-service** dequeues entries, calls the stage's service, updates job status, enqueues next stage
+2. **orchestrator-service** dequeues entries one at a time (strictly sequential — never concurrent)
 3. Each service processes its input and returns a JSON result
-4. On failure, orchestrator marks job as `Failed` and clears the queue entry
+4. On success, orchestrator enqueues the next pipeline stage
+5. On **service unavailable** (connection refused/timeout): job is marked `Pending`, queue entry is nacked (returned to queue), orchestrator backs off then retries later
+6. On **processing failure** (HTTP error, bad data): job is marked `Failed` and the queue entry is cleared
+
+### GPU Service Constraints
+
+Downstream services share GPU resources on a LAN host. Only one service may be active at a time, and which service is running changes over time. The orchestrator enforces:
+- **Sequential dispatch**: one service call at a time, fully awaited before the next
+- **Graceful unavailability**: connection refused or timeout → hold job as `Pending`, retry on next poll cycle (not `Failed`)
+- **Connect timeout**: 5s connect timeout catches down services quickly; 300s request timeout allows long GPU operations
+- **Configurable backoff**: `UNAVAILABLE_BACKOFF_SECS` (default 15) controls retry delay when services are down; `POLL_INTERVAL_SECS` (default 5) controls idle polling
 
 ## Code Quality Standards
 

@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use artifact_store::ArtifactStore;
 use job_queue::JobQueue;
@@ -112,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
     let queue = Arc::new(JobQueue::open(&queue_path)?);
     let registry = ServiceRegistry::from_env();
     let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(300))
         .build()?;
 
@@ -157,13 +158,29 @@ async fn status(State(state): State<AppState>) -> Json<OrchestratorStatus> {
     })
 }
 
-/// Poll loop: dequeue jobs and dispatch to services.
+/// Poll loop: dequeue jobs one at a time and dispatch sequentially.
+///
+/// All dispatches are serialized — only one service call is in flight at
+/// any time. This is required because downstream GPU services cannot
+/// handle concurrent requests without quality degradation.
+///
+/// When a service is unreachable the queue entry is nacked (returned to
+/// pending) and the job is marked `Pending` so the orchestrator will
+/// retry it on a future poll cycle once the service comes back up.
 async fn poll_loop(state: AppState) {
     let poll_interval = Duration::from_secs(
         std::env::var("POLL_INTERVAL_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(2),
+            .unwrap_or(5),
+    );
+
+    // Longer backoff when services are down to avoid log spam.
+    let unavailable_backoff = Duration::from_secs(
+        std::env::var("UNAVAILABLE_BACKOFF_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(15),
     );
 
     loop {
@@ -175,7 +192,8 @@ async fn poll_loop(state: AppState) {
                     "processing queue entry"
                 );
 
-                let result = dispatch_stage(
+                // Sequential dispatch — one at a time, awaited to completion.
+                let outcome = dispatch_stage(
                     &state.http,
                     &state.registry,
                     &state.store,
@@ -184,14 +202,12 @@ async fn poll_loop(state: AppState) {
                 )
                 .await;
 
-                match result {
-                    Ok(next_stage) => {
-                        // Acknowledge the completed entry
+                match outcome {
+                    DispatchOutcome::Ok(next_stage) => {
                         if let Err(e) = state.queue.acknowledge(entry.entry_id).await {
                             error!(error = %e, "failed to acknowledge queue entry");
                         }
 
-                        // Enqueue next stage if pipeline continues
                         if let Some(next) = next_stage {
                             let next_str = next.to_string();
                             info!(
@@ -204,27 +220,48 @@ async fn poll_loop(state: AppState) {
                             }
                         }
                     }
-                    Err(e) => {
+                    DispatchOutcome::ServiceUnavailable(reason) => {
+                        warn!(
+                            job_id = %entry.job_id,
+                            stage = %entry.stage,
+                            reason = %reason,
+                            "service unavailable, holding job pending"
+                        );
+                        // Mark job as Pending so the UI reflects the wait.
+                        let current_stage: Option<Stage> =
+                            serde_json::from_str(&format!("\"{}\"", entry.stage)).ok();
+                        if let Some(stage) = current_stage {
+                            let _ = state
+                                .store
+                                .update_job_status(&entry.job_id, &JobStatus::Pending, &stage)
+                                .await;
+                        }
+                        // Nack: return the entry to the queue for retry.
+                        if let Err(e) = state.queue.nack(entry.entry_id).await {
+                            error!(error = %e, "failed to nack queue entry");
+                        }
+                        // Back off before polling again.
+                        tokio::time::sleep(unavailable_backoff).await;
+                    }
+                    DispatchOutcome::Failed(reason) => {
                         error!(
                             job_id = %entry.job_id,
                             stage = %entry.stage,
-                            error = %e,
+                            reason = %reason,
                             "stage dispatch failed, marking job as Failed"
                         );
-                        if let Err(ue) = state
+                        if let Err(e) = state
                             .store
                             .update_job_status(&entry.job_id, &JobStatus::Failed, &Stage::Failed)
                             .await
                         {
-                            error!(error = %ue, "failed to update job status to Failed");
+                            error!(error = %e, "failed to update job status to Failed");
                         }
-                        // Still acknowledge so the entry doesn't block the queue
                         let _ = state.queue.acknowledge(entry.entry_id).await;
                     }
                 }
             }
             Ok(None) => {
-                // Nothing in queue, sleep
                 tokio::time::sleep(poll_interval).await;
             }
             Err(e) => {
@@ -235,46 +272,79 @@ async fn poll_loop(state: AppState) {
     }
 }
 
-/// Dispatch a single stage: call the service, update job status, return next stage.
+/// Outcome of a stage dispatch attempt.
+enum DispatchOutcome {
+    /// Stage completed; contains the next stage (if any).
+    Ok(Option<Stage>),
+    /// Service is unreachable — job should be held pending for retry.
+    ServiceUnavailable(String),
+    /// Permanent failure — job should be marked Failed.
+    Failed(String),
+}
+
+/// Returns true if a reqwest error indicates the service is down
+/// (connection refused, DNS failure, connect timeout) rather than
+/// an application-level error.
+fn is_service_unavailable(err: &reqwest::Error) -> bool {
+    err.is_connect() || err.is_timeout()
+}
+
+/// Dispatch a single stage: call the service, update job status, return outcome.
 async fn dispatch_stage(
     http: &reqwest::Client,
     registry: &ServiceRegistry,
     store: &ArtifactStore,
     job_id: &str,
     stage: &str,
-) -> anyhow::Result<Option<Stage>> {
-    let current_stage: Stage = serde_json::from_str(&format!("\"{stage}\""))?;
+) -> DispatchOutcome {
+    let current_stage: Stage = match serde_json::from_str(&format!("\"{stage}\"")) {
+        Ok(s) => s,
+        Err(e) => return DispatchOutcome::Failed(format!("invalid stage '{stage}': {e}")),
+    };
 
     // Mark job as Running
-    store
+    if let Err(e) = store
         .update_job_status(job_id, &JobStatus::Running, &current_stage)
-        .await?;
+        .await
+    {
+        return DispatchOutcome::Failed(format!("failed to update job status: {e}"));
+    }
 
-    let endpoint = registry
-        .endpoint_for(stage)
-        .ok_or_else(|| anyhow::anyhow!("no endpoint configured for stage '{stage}'"))?;
+    let endpoint = match registry.endpoint_for(stage) {
+        Some(ep) => ep,
+        None => return DispatchOutcome::Failed(format!("no endpoint for stage '{stage}'")),
+    };
 
     info!(job_id, stage, endpoint = %endpoint, "calling service");
 
     // Build the request body from the job data
-    let job = store
-        .get_job(job_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("job '{job_id}' not found in store"))?;
+    let job = match store.get_job(job_id).await {
+        Ok(Some(j)) => j,
+        Ok(None) => return DispatchOutcome::Failed(format!("job '{job_id}' not found")),
+        Err(e) => return DispatchOutcome::Failed(format!("store error: {e}")),
+    };
 
-    let body = build_stage_request(stage, &job)?;
+    let body = match build_stage_request(stage, &job) {
+        Ok(b) => b,
+        Err(e) => return DispatchOutcome::Failed(format!("request build error: {e}")),
+    };
 
-    let resp = http
-        .post(&endpoint)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("HTTP request to {endpoint} failed: {e}"))?;
+    let resp = match http.post(&endpoint).json(&body).send().await {
+        Ok(r) => r,
+        Err(e) if is_service_unavailable(&e) => {
+            return DispatchOutcome::ServiceUnavailable(format!(
+                "service {stage} at {endpoint} unreachable: {e}"
+            ));
+        }
+        Err(e) => {
+            return DispatchOutcome::Failed(format!("HTTP error calling {stage}: {e}"));
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("service {stage} returned {status}: {text}");
+        return DispatchOutcome::Failed(format!("service {stage} returned {status}: {text}"));
     }
 
     info!(job_id, stage, "stage completed successfully");
@@ -283,25 +353,28 @@ async fn dispatch_stage(
     let next = current_stage.next_mvp();
 
     // Update job status
-    match &next {
+    let status_result = match &next {
         Some(next_stage) => {
             store
                 .update_job_status(job_id, &JobStatus::Running, next_stage)
-                .await?;
+                .await
         }
         None => {
-            // Pipeline complete or failed
             if matches!(current_stage, Stage::Complete | Stage::Failed) {
-                // Already terminal
+                Ok(())
             } else {
                 store
                     .update_job_status(job_id, &JobStatus::Completed, &Stage::Complete)
-                    .await?;
+                    .await
             }
         }
+    };
+
+    if let Err(e) = status_result {
+        return DispatchOutcome::Failed(format!("failed to update job status: {e}"));
     }
 
-    Ok(next)
+    DispatchOutcome::Ok(next)
 }
 
 /// Build the JSON body for a stage's service call from the job data.

@@ -55,6 +55,7 @@ pub struct PipelineJobRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JobStatus {
     Queued,
+    Pending,
     Running,
     WaitingForReview,
     Completed,
@@ -126,6 +127,7 @@ impl fmt::Display for JobStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Queued => write!(f, "Queued"),
+            Self::Pending => write!(f, "Pending"),
             Self::Running => write!(f, "Running"),
             Self::WaitingForReview => write!(f, "WaitingForReview"),
             Self::Completed => write!(f, "Completed"),
