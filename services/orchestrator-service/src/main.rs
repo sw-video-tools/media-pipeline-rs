@@ -521,13 +521,43 @@ async fn build_stage_request(
             }))
         }
         "AsrValidation" => {
-            // Use TTS output for audio paths + script for expected text.
+            // Combine TTS audio paths with script expected text.
             let tts = store.get_stage_output(job_id, "Tts").await.ok().flatten();
-            let segments = if let Some(ref t) = tts {
-                t["segments"].as_array().cloned().unwrap_or_default()
-            } else {
-                vec![]
-            };
+            let script = store
+                .get_stage_output(job_id, "Script")
+                .await
+                .ok()
+                .flatten();
+
+            let tts_files = tts
+                .as_ref()
+                .and_then(|t| t["segment_files"].as_array())
+                .cloned()
+                .unwrap_or_default();
+            let script_segs = script
+                .as_ref()
+                .and_then(|s| s["segments"].as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            let segments: Vec<serde_json::Value> = tts_files
+                .iter()
+                .map(|tf| {
+                    let seg_num = tf["segment_number"].as_u64().unwrap_or(0) as u32;
+                    let audio_path = tf["file_path"].as_str().unwrap_or_default();
+                    let expected_text = script_segs
+                        .iter()
+                        .find(|s| s["segment_number"].as_u64().unwrap_or(0) as u32 == seg_num)
+                        .and_then(|s| s["narration_text"].as_str())
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "segment_number": seg_num,
+                        "audio_path": audio_path,
+                        "expected_text": expected_text,
+                    })
+                })
+                .collect();
+
             Ok(serde_json::json!({
                 "job_id": job_id,
                 "segments": segments,
@@ -556,21 +586,16 @@ async fn build_stage_request(
             }))
         }
         "RenderFinal" => {
-            // Pull audio paths from TTS output.
+            // Pull audio paths from TTS output (segment_files[].file_path).
             let tts = store.get_stage_output(job_id, "Tts").await.ok().flatten();
-            let audio_files: Vec<serde_json::Value> = tts
+            let audio_files: Vec<String> = tts
                 .as_ref()
-                .and_then(|t| t["audio_files"].as_array().cloned())
-                .or_else(|| {
-                    tts.as_ref().and_then(|t| {
-                        t["segments"].as_array().map(|segs| {
-                            segs.iter()
-                                .filter_map(|s| {
-                                    s["audio_path"].as_str().map(|p| serde_json::json!(p))
-                                })
-                                .collect()
-                        })
-                    })
+                .and_then(|t| t["segment_files"].as_array())
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(|f| f["file_path"].as_str().map(String::from))
+                        .collect()
                 })
                 .unwrap_or_default();
             Ok(serde_json::json!({
@@ -675,6 +700,67 @@ mod tests {
         let job = sample_job();
         let body = build_stage_request("QaFinal", &job, &store).await.unwrap();
         assert_eq!(body["output_path"], "/custom/path.mp4");
+    }
+
+    #[tokio::test]
+    async fn build_asr_uses_tts_and_script_outputs() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let tts_output = serde_json::json!({
+            "job_id": "test-1",
+            "segment_files": [
+                {"segment_number": 1, "file_path": "/data/tts/test-1_seg001.mp3"},
+                {"segment_number": 2, "file_path": "/data/tts/test-1_seg002.mp3"},
+            ],
+        });
+        let script_output = serde_json::json!({
+            "job_id": "test-1",
+            "segments": [
+                {"segment_number": 1, "narration_text": "Hello world"},
+                {"segment_number": 2, "narration_text": "Goodbye world"},
+            ],
+        });
+        store
+            .save_stage_output("test-1", "Tts", &tts_output)
+            .await
+            .unwrap();
+        store
+            .save_stage_output("test-1", "Script", &script_output)
+            .await
+            .unwrap();
+
+        let job = sample_job();
+        let body = build_stage_request("AsrValidation", &job, &store)
+            .await
+            .unwrap();
+        let segments = body["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0]["audio_path"], "/data/tts/test-1_seg001.mp3");
+        assert_eq!(segments[0]["expected_text"], "Hello world");
+        assert_eq!(segments[1]["audio_path"], "/data/tts/test-1_seg002.mp3");
+        assert_eq!(segments[1]["expected_text"], "Goodbye world");
+    }
+
+    #[tokio::test]
+    async fn build_render_uses_tts_audio_paths() {
+        let store = ArtifactStore::open_in_memory().unwrap();
+        let tts_output = serde_json::json!({
+            "job_id": "test-1",
+            "segment_files": [
+                {"segment_number": 1, "file_path": "/data/tts/test-1_seg001.mp3"},
+            ],
+        });
+        store
+            .save_stage_output("test-1", "Tts", &tts_output)
+            .await
+            .unwrap();
+
+        let job = sample_job();
+        let body = build_stage_request("RenderFinal", &job, &store)
+            .await
+            .unwrap();
+        let audio_files = body["audio_files"].as_array().unwrap();
+        assert_eq!(audio_files.len(), 1);
+        assert_eq!(audio_files[0], "/data/tts/test-1_seg001.mp3");
     }
 
     #[tokio::test]
