@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -99,6 +100,7 @@ struct AppState {
     queue: Arc<JobQueue>,
     registry: ServiceRegistry,
     http: reqwest::Client,
+    shutting_down: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -126,11 +128,14 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(300))
         .build()?;
 
+    let shutting_down = Arc::new(AtomicBool::new(false));
+
     let state = AppState {
         store: store.clone(),
         queue: queue.clone(),
         registry: registry.clone(),
         http: http.clone(),
+        shutting_down: shutting_down.clone(),
     };
 
     // Health/status API
@@ -148,12 +153,57 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn the poll loop
     let poll_state = state.clone();
-    tokio::spawn(async move {
+    let poll_handle = tokio::spawn(async move {
         poll_loop(poll_state).await;
     });
 
-    axum::serve(listener, app).await?;
+    // Listen for shutdown signals (SIGTERM, SIGINT).
+    let shutdown_flag = shutting_down.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        info!("shutdown signal received, draining...");
+        shutdown_flag.store(true, Ordering::SeqCst);
+    });
+
+    // Serve until the poll loop exits (triggered by shutdown flag).
+    let serve_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                // Wait until the poll loop finishes its current dispatch.
+                poll_handle.await.ok();
+            })
+            .await
+            .ok();
+    });
+
+    serve_handle.await?;
+    info!("orchestrator shut down cleanly");
     Ok(())
+}
+
+/// Wait for SIGTERM or SIGINT (Ctrl-C).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to listen for ctrl-c");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to listen for SIGTERM")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
 }
 
 async fn healthz() -> &'static str {
@@ -200,6 +250,10 @@ async fn poll_loop(state: AppState) {
         .unwrap_or(50);
 
     loop {
+        if state.shutting_down.load(Ordering::SeqCst) {
+            info!("shutdown flag set, exiting poll loop");
+            break;
+        }
         match state.queue.dequeue().await {
             Ok(Some(entry)) => {
                 info!(
