@@ -102,6 +102,7 @@ dependencies = [
  "serde_json",
  "telemetry",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "uuid",
