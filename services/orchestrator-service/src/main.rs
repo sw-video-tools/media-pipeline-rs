@@ -79,6 +79,28 @@ impl ServiceRegistry {
     }
 }
 
+/// Return the max retry attempts for a stage.
+///
+/// GPU-bound stages (TTS, ASR, Render) get more retries because
+/// their services are expected to be down more often (shared GPU host,
+/// only one service can run at a time). CPU-bound stages (Planning,
+/// Research, Script, Captions, QA) use the default limit.
+fn max_attempts_for_stage(stage: &str, default: u32) -> u32 {
+    // Allow per-stage overrides via env: MAX_RETRY_TTS=100, etc.
+    let env_key = format!("MAX_RETRY_{}", stage.to_uppercase());
+    if let Ok(val) = std::env::var(&env_key)
+        && let Ok(n) = val.parse::<u32>()
+    {
+        return n;
+    }
+
+    match stage {
+        // GPU stages: default to 2x the base limit
+        "Tts" | "AsrValidation" | "RenderFinal" => default.saturating_mul(2),
+        _ => default,
+    }
+}
+
 /// Map stage names to their service endpoint paths.
 fn stage_to_path(stage: &str) -> &'static str {
     match stage {
@@ -282,8 +304,8 @@ async fn poll_loop(state: AppState) {
             .unwrap_or(15),
     );
 
-    // Max retry attempts before marking a job as permanently failed.
-    let max_attempts: u32 = std::env::var("MAX_RETRY_ATTEMPTS")
+    // Default max retry attempts before marking a job as permanently failed.
+    let default_max_attempts: u32 = std::env::var("MAX_RETRY_ATTEMPTS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(50);
@@ -359,6 +381,8 @@ async fn poll_loop(state: AppState) {
                                 ),
                             )
                             .await;
+                        let max_attempts =
+                            max_attempts_for_stage(&entry.stage, default_max_attempts);
                         if entry.attempts >= max_attempts {
                             error!(
                                 job_id = %entry.job_id,
@@ -1238,5 +1262,23 @@ mod tests {
             let output = store.get_stage_output("test-1", stage).await.unwrap();
             assert!(output.is_some(), "missing output for stage {stage}");
         }
+    }
+
+    #[test]
+    fn gpu_stages_get_more_retries() {
+        let default = 50;
+        assert_eq!(max_attempts_for_stage("Tts", default), 100);
+        assert_eq!(max_attempts_for_stage("AsrValidation", default), 100);
+        assert_eq!(max_attempts_for_stage("RenderFinal", default), 100);
+    }
+
+    #[test]
+    fn cpu_stages_use_default_retries() {
+        let default = 50;
+        assert_eq!(max_attempts_for_stage("Planning", default), 50);
+        assert_eq!(max_attempts_for_stage("Research", default), 50);
+        assert_eq!(max_attempts_for_stage("Script", default), 50);
+        assert_eq!(max_attempts_for_stage("Captions", default), 50);
+        assert_eq!(max_attempts_for_stage("QaFinal", default), 50);
     }
 }
