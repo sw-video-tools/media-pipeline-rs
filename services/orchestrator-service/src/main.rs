@@ -104,9 +104,19 @@ struct AppState {
 }
 
 #[derive(Debug, Serialize)]
+struct ServiceHealth {
+    name: String,
+    url: String,
+    healthy: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 struct OrchestratorStatus {
     running: bool,
     pending_jobs: usize,
+    services: Vec<ServiceHealth>,
 }
 
 #[tokio::main]
@@ -212,9 +222,38 @@ async fn healthz() -> &'static str {
 
 async fn status(State(state): State<AppState>) -> Json<OrchestratorStatus> {
     let pending = state.queue.pending_count().await.unwrap_or(0);
+
+    let stage_names = [
+        "Planning",
+        "Research",
+        "Script",
+        "Tts",
+        "AsrValidation",
+        "Captions",
+        "RenderFinal",
+        "QaFinal",
+    ];
+
+    let mut services = Vec::with_capacity(stage_names.len());
+    for name in &stage_names {
+        if let Some(url) = state.registry.healthz_url(name) {
+            let (healthy, error) = match check_health(&state.http, &url).await {
+                Ok(()) => (true, None),
+                Err(e) => (false, Some(e)),
+            };
+            services.push(ServiceHealth {
+                name: name.to_string(),
+                url,
+                healthy,
+                error,
+            });
+        }
+    }
+
     Json(OrchestratorStatus {
         running: true,
         pending_jobs: pending,
+        services,
     })
 }
 
@@ -966,10 +1005,19 @@ mod tests {
         let status = OrchestratorStatus {
             running: true,
             pending_jobs: 3,
+            services: vec![ServiceHealth {
+                name: "Planning".into(),
+                url: "http://127.0.0.1:3191/healthz".into(),
+                healthy: true,
+                error: None,
+            }],
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("\"running\":true"));
         assert!(json.contains("\"pending_jobs\":3"));
+        assert!(json.contains("\"healthy\":true"));
+        // error field should be omitted when None
+        assert!(!json.contains("\"error\""));
     }
 
     fn sample_job() -> pipeline_types::PipelineJob {
