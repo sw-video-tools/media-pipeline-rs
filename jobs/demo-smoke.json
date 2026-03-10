@@ -1,0 +1,9 @@
+{
+  "title": "Rust Memory Safety in 30 Seconds",
+  "idea": "Explain how Rust prevents memory bugs using ownership and borrowing, with a simple example comparing C and Rust",
+  "audience": "developers new to Rust",
+  "target_duration_seconds": 30,
+  "tone": "friendly and approachable",
+  "must_include": ["ownership", "borrowing", "no garbage collector"],
+  "must_avoid": ["unsafe code details"]
+}

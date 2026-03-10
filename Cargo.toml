@@ -25,7 +25,8 @@ members = [
   "services/preview-service",
   "services/orchestrator-service",
   "apps/operator-cli",
-  "apps/review-web"
+  "apps/review-web",
+  "apps/demo-runner"
 ]
 resolver = "2"
 

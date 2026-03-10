@@ -83,3 +83,68 @@ list-jobs:
 
 health:
     cargo run -p operator-cli -- health
+
+# Demo: run mock services + api-gateway + orchestrator for smoke testing
+demo-services:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    trap 'kill $(jobs -p) 2>/dev/null' EXIT
+    MOCK_PORT=${MOCK_PORT:-3200}
+    echo "Starting mock services on port $MOCK_PORT..."
+    cargo run -p demo-runner -- mock &
+    sleep 1
+    echo "Starting api-gateway + orchestrator (pointed at mock services)..."
+    PLANNER_URL=http://127.0.0.1:$MOCK_PORT \
+    RESEARCH_URL=http://127.0.0.1:$MOCK_PORT \
+    SCRIPT_URL=http://127.0.0.1:$MOCK_PORT \
+    TTS_URL=http://127.0.0.1:$MOCK_PORT \
+    ASR_URL=http://127.0.0.1:$MOCK_PORT \
+    CAPTIONS_URL=http://127.0.0.1:$MOCK_PORT \
+    RENDER_URL=http://127.0.0.1:$MOCK_PORT \
+    QA_URL=http://127.0.0.1:$MOCK_PORT \
+    cargo run -p api-gateway &
+    PLANNER_URL=http://127.0.0.1:$MOCK_PORT \
+    RESEARCH_URL=http://127.0.0.1:$MOCK_PORT \
+    SCRIPT_URL=http://127.0.0.1:$MOCK_PORT \
+    TTS_URL=http://127.0.0.1:$MOCK_PORT \
+    ASR_URL=http://127.0.0.1:$MOCK_PORT \
+    CAPTIONS_URL=http://127.0.0.1:$MOCK_PORT \
+    RENDER_URL=http://127.0.0.1:$MOCK_PORT \
+    QA_URL=http://127.0.0.1:$MOCK_PORT \
+    cargo run -p orchestrator-service &
+    wait
+
+# Run the demo end-to-end (requires demo-services running in another terminal)
+demo-run:
+    cargo run -p demo-runner
+
+# Quick demo: start everything and run the smoke test
+demo:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    MOCK_PORT=${MOCK_PORT:-3200}
+    trap 'kill $(jobs -p) 2>/dev/null' EXIT
+    echo "=== Starting demo infrastructure ==="
+    cargo run -p demo-runner -- mock &
+    sleep 1
+    PLANNER_URL=http://127.0.0.1:$MOCK_PORT \
+    RESEARCH_URL=http://127.0.0.1:$MOCK_PORT \
+    SCRIPT_URL=http://127.0.0.1:$MOCK_PORT \
+    TTS_URL=http://127.0.0.1:$MOCK_PORT \
+    ASR_URL=http://127.0.0.1:$MOCK_PORT \
+    CAPTIONS_URL=http://127.0.0.1:$MOCK_PORT \
+    RENDER_URL=http://127.0.0.1:$MOCK_PORT \
+    QA_URL=http://127.0.0.1:$MOCK_PORT \
+    cargo run -p api-gateway &
+    PLANNER_URL=http://127.0.0.1:$MOCK_PORT \
+    RESEARCH_URL=http://127.0.0.1:$MOCK_PORT \
+    SCRIPT_URL=http://127.0.0.1:$MOCK_PORT \
+    TTS_URL=http://127.0.0.1:$MOCK_PORT \
+    ASR_URL=http://127.0.0.1:$MOCK_PORT \
+    CAPTIONS_URL=http://127.0.0.1:$MOCK_PORT \
+    RENDER_URL=http://127.0.0.1:$MOCK_PORT \
+    QA_URL=http://127.0.0.1:$MOCK_PORT \
+    cargo run -p orchestrator-service &
+    sleep 3
+    echo ""
+    cargo run -p demo-runner

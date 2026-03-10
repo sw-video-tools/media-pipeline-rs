@@ -1,0 +1,20 @@
+[package]
+name = "demo-runner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+pipeline-types = { path = "../../crates/pipeline-types", package = "pipeline-types" }
+telemetry = { path = "../../crates/telemetry", package = "telemetry" }
+
+[dev-dependencies]
+tower.workspace = true

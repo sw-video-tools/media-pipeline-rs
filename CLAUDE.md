@@ -74,7 +74,7 @@ Every pipeline stage reads input artifact refs and writes output artifact refs. 
   - `validator-core`: `require()` helper producing `ValidationIssue` lists
   - `prompt-templates`, `telemetry`
 - **`services/`** — 15 Axum microservices (see Service Ports below)
-- **`apps/`** — `operator-cli` (submit/status/list via API gateway), `review-web` (stub)
+- **`apps/`** — `operator-cli` (submit/status/detail/logs/retry/delete/list/health), `demo-runner` (mock services + smoke test), `review-web` (stub)
 - **`config/`** — `local.toml`, `production.toml`, `models.toml`
 - **`jobs/`** — Sample job JSON manifests
 - **`docs/`** — Architecture, validation strategy, provider routing, deployment docs
@@ -138,3 +138,23 @@ Downstream services share GPU resources on a LAN host. Only one service may be a
 - **`config/models.toml`**: Maps capabilities (planning, script, tts, asr) to provider+model pairs
 - **`.env.example`**: Environment variables including `RUST_LOG`, `SQLITE_DB`, `QUEUE_DB`, `FFMPEG_BIN`, `OPENAI_API_KEY`
 - Service URLs configurable via env vars: `PLANNER_URL`, `RESEARCH_URL`, `SCRIPT_URL`, `TTS_URL`, `ASR_URL`, `CAPTIONS_URL`, `RENDER_URL`, `QA_URL`
+
+## Demo / Smoke Test
+
+```bash
+# Quick: start everything + run demo in one command
+just demo
+
+# Or manually:
+# Terminal 1: mock services + real api-gateway + orchestrator
+just demo-services
+
+# Terminal 2: submit demo job and monitor progress
+just demo-run
+```
+
+The demo-runner (`apps/demo-runner`) provides:
+- **Mock services**: single binary serving all 8 stage endpoints on port 3200 with realistic chaining data
+- **Smoke test runner**: submits a job, monitors all 8 stages, shows stage outputs and event timeline
+- **`cargo run -p demo-runner -- mock`**: run just the mock server
+- **`cargo run -p demo-runner`**: run the smoke test (requires api-gateway + orchestrator running)
