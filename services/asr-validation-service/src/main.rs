@@ -69,7 +69,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("ASR_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:3005".into())
+        .unwrap_or_else(|_| "0.0.0.0:3195".into())
         .parse()?;
     info!("asr-validation-service listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;

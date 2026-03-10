@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/qa", post(run_qa));
 
     let addr: SocketAddr = std::env::var("QA_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:3008".into())
+        .unwrap_or_else(|_| "0.0.0.0:3198".into())
         .parse()?;
     info!("qa-service listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;

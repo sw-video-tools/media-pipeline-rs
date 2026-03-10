@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("PLANNER_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:3001".into())
+        .unwrap_or_else(|_| "0.0.0.0:3191".into())
         .parse()?;
     info!("planner-service listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -11,8 +11,8 @@ just fmt                  # cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 
 # Run services
-just run-api              # cargo run -p api-gateway (port 3000)
-just run-orchestrator     # cargo run -p orchestrator-service (port 3010)
+just run-api              # cargo run -p api-gateway (port 3190)
+just run-orchestrator     # cargo run -p orchestrator-service (port 3199)
 
 # Run a specific service
 cargo run -p <service-name>
@@ -83,16 +83,16 @@ Driven by the **orchestrator-service** which polls the job-queue and calls each 
 
 | Port | Service | Endpoint |
 |------|---------|----------|
-| 3000 | api-gateway | GET/POST /jobs, GET /jobs/:id |
-| 3001 | planner-service | POST /plan |
-| 3002 | research-service | POST /research |
-| 3003 | script-service | POST /script |
-| 3004 | tts-service | POST /tts |
-| 3005 | asr-validation-service | POST /validate |
-| 3006 | captions-service | POST /captions |
-| 3007 | render-service | POST /render |
-| 3008 | qa-service | POST /qa |
-| 3010 | orchestrator-service | GET /status |
+| 3190 | api-gateway | GET/POST /jobs, GET /jobs/:id |
+| 3191 | planner-service | POST /plan |
+| 3192 | research-service | POST /research |
+| 3193 | script-service | POST /script |
+| 3194 | tts-service | POST /tts |
+| 3195 | asr-validation-service | POST /validate |
+| 3196 | captions-service | POST /captions |
+| 3197 | render-service | POST /render |
+| 3198 | qa-service | POST /qa |
+| 3199 | orchestrator-service | GET /status |
 
 ### Service Pattern
 

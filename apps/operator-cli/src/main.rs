@@ -13,7 +13,7 @@ use pipeline_types::PipelineJob;
 #[command(name = "operator-cli", about = "Media pipeline operator CLI")]
 struct Cli {
     /// API gateway base URL
-    #[arg(long, env = "API_URL", default_value = "http://127.0.0.1:3000")]
+    #[arg(long, env = "API_URL", default_value = "http://127.0.0.1:3190")]
     api_url: String,
 
     #[command(subcommand)]

@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("API_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:3000".into())
+        .unwrap_or_else(|_| "0.0.0.0:3190".into())
         .parse()?;
     info!("api-gateway listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -28,35 +28,35 @@ impl ServiceRegistry {
         let mut urls = HashMap::new();
         urls.insert(
             "Planning".into(),
-            std::env::var("PLANNER_URL").unwrap_or_else(|_| "http://127.0.0.1:3001".into()),
+            std::env::var("PLANNER_URL").unwrap_or_else(|_| "http://127.0.0.1:3191".into()),
         );
         urls.insert(
             "Research".into(),
-            std::env::var("RESEARCH_URL").unwrap_or_else(|_| "http://127.0.0.1:3002".into()),
+            std::env::var("RESEARCH_URL").unwrap_or_else(|_| "http://127.0.0.1:3192".into()),
         );
         urls.insert(
             "Script".into(),
-            std::env::var("SCRIPT_URL").unwrap_or_else(|_| "http://127.0.0.1:3003".into()),
+            std::env::var("SCRIPT_URL").unwrap_or_else(|_| "http://127.0.0.1:3193".into()),
         );
         urls.insert(
             "Tts".into(),
-            std::env::var("TTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3004".into()),
+            std::env::var("TTS_URL").unwrap_or_else(|_| "http://127.0.0.1:3194".into()),
         );
         urls.insert(
             "AsrValidation".into(),
-            std::env::var("ASR_URL").unwrap_or_else(|_| "http://127.0.0.1:3005".into()),
+            std::env::var("ASR_URL").unwrap_or_else(|_| "http://127.0.0.1:3195".into()),
         );
         urls.insert(
             "Captions".into(),
-            std::env::var("CAPTIONS_URL").unwrap_or_else(|_| "http://127.0.0.1:3006".into()),
+            std::env::var("CAPTIONS_URL").unwrap_or_else(|_| "http://127.0.0.1:3196".into()),
         );
         urls.insert(
             "RenderFinal".into(),
-            std::env::var("RENDER_URL").unwrap_or_else(|_| "http://127.0.0.1:3007".into()),
+            std::env::var("RENDER_URL").unwrap_or_else(|_| "http://127.0.0.1:3197".into()),
         );
         urls.insert(
             "QaFinal".into(),
-            std::env::var("QA_URL").unwrap_or_else(|_| "http://127.0.0.1:3008".into()),
+            std::env::var("QA_URL").unwrap_or_else(|_| "http://127.0.0.1:3198".into()),
         );
         Self { urls }
     }
@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state.clone());
 
     let addr: SocketAddr = std::env::var("ORCHESTRATOR_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:3010".into())
+        .unwrap_or_else(|_| "0.0.0.0:3199".into())
         .parse()?;
     info!("orchestrator-service listening on {addr}");
 

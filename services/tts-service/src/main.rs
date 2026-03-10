@@ -73,7 +73,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     let addr: SocketAddr = std::env::var("TTS_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:3004".into())
+        .unwrap_or_else(|_| "0.0.0.0:3194".into())
         .parse()?;
     info!("tts-service listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
