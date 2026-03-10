@@ -17,6 +17,11 @@ just run-orchestrator     # cargo run -p orchestrator-service (port 3010)
 # Run a specific service
 cargo run -p <service-name>
 
+# Operator CLI
+cargo run -p operator-cli -- submit jobs/sample-explainer.json
+cargo run -p operator-cli -- status <job-id>
+cargo run -p operator-cli -- list
+
 # Tests
 cargo test                # all tests
 cargo test -p <crate>     # single crate
@@ -63,7 +68,7 @@ Every pipeline stage reads input artifact refs and writes output artifact refs. 
   - `validator-core`: `require()` helper producing `ValidationIssue` lists
   - `prompt-templates`, `telemetry`
 - **`services/`** — 15 Axum microservices (see Service Ports below)
-- **`apps/`** — `operator-cli` (clap, stub), `review-web` (stub)
+- **`apps/`** — `operator-cli` (submit/status/list via API gateway), `review-web` (stub)
 - **`config/`** — `local.toml`, `production.toml`, `models.toml`
 - **`jobs/`** — Sample job JSON manifests
 - **`docs/`** — Architecture, validation strategy, provider routing, deployment docs
@@ -78,7 +83,7 @@ Driven by the **orchestrator-service** which polls the job-queue and calls each 
 
 | Port | Service | Endpoint |
 |------|---------|----------|
-| 3000 | api-gateway | POST /jobs |
+| 3000 | api-gateway | GET/POST /jobs, GET /jobs/:id |
 | 3001 | planner-service | POST /plan |
 | 3002 | research-service | POST /research |
 | 3003 | script-service | POST /script |
