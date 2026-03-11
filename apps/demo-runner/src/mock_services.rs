@@ -352,42 +352,7 @@ async fn render(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> 
         std::fs::rename(&clip_paths[0], &output_path).ok();
         info!("Render: single clip → {output_path}");
     } else {
-        // Concatenate all clips into final output.
-        let list_path = format!("{dir}/concat.txt");
-        let list_content: String = clip_paths
-            .iter()
-            .map(|p| {
-                let abs = std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
-                format!("file '{}'\n", abs.display())
-            })
-            .collect();
-        std::fs::write(&list_path, &list_content).ok();
-
-        let status = Command::new("ffmpeg")
-            .args([
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                &list_path,
-                "-c",
-                "copy",
-                &output_path,
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match status {
-            Ok(s) if s.success() => {
-                info!(
-                    "Render: concatenated {} clips → {output_path}",
-                    clip_paths.len()
-                );
-            }
-            _ => info!("Render: concat failed, falling back to first clip"),
-        }
+        join_clips_with_fade(&clip_paths, &output_path, &dir);
     }
 
     Json(serde_json::json!({
@@ -498,6 +463,171 @@ fn render_content_segment(audio_path: &str, srt_path: &str, _seg_idx: usize, out
         Ok(s) if s.success() => info!("Render: content clip → {out}"),
         _ => info!("Render: content clip failed for {out}"),
     }
+}
+
+/// Join clips with crossfade transitions (video xfade + audio acrossfade).
+fn join_clips_with_fade(clips: &[String], output: &str, work_dir: &str) {
+    let fade_dur = 0.5; // seconds of crossfade between clips
+
+    // For 2 clips: single xfade. For N clips: chain xfades.
+    // Build a filter_complex that crossfades each pair.
+    let n = clips.len();
+    let mut inputs = Vec::new();
+    for clip in clips {
+        inputs.push("-i".to_string());
+        inputs.push(clip.clone());
+    }
+
+    // Get durations of each clip for computing xfade offsets.
+    let durations: Vec<f64> = clips
+        .iter()
+        .map(|c| probe_duration(c).unwrap_or(5.0))
+        .collect();
+
+    if n == 2 {
+        // Simple case: one xfade between two clips.
+        let offset = (durations[0] - fade_dur).max(0.0);
+        let filter = format!(
+            "[0:v][1:v]xfade=transition=fade:duration={fade_dur}:offset={offset}[v];\
+             [0:a][1:a]acrossfade=d={fade_dur}[a]"
+        );
+        let status = Command::new("ffmpeg")
+            .args(inputs.iter().map(|s| s.as_str()))
+            .args([
+                "-y",
+                "-filter_complex",
+                &filter,
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-pix_fmt",
+                "yuv420p",
+                output,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                info!("Render: crossfade {n} clips → {output}");
+                return;
+            }
+            _ => info!("Render: xfade failed, falling back to concat"),
+        }
+    } else {
+        // Chain xfades for N > 2 clips.
+        let mut vf_parts = Vec::new();
+        let mut af_parts = Vec::new();
+        let mut cumulative_offset = 0.0;
+
+        for (i, dur) in durations.iter().enumerate().take(n - 1) {
+            let v_in_a = if i == 0 {
+                "[0:v]".to_string()
+            } else {
+                format!("[xv{i}]")
+            };
+            let v_in_b = format!("[{}:v]", i + 1);
+            let v_out = if i == n - 2 {
+                "[v]".to_string()
+            } else {
+                format!("[xv{}]", i + 1)
+            };
+            cumulative_offset += dur - fade_dur;
+            vf_parts.push(format!(
+                "{v_in_a}{v_in_b}xfade=transition=fade:duration={fade_dur}:offset={cumulative_offset}{v_out}"
+            ));
+
+            let a_in_a = if i == 0 {
+                "[0:a]".to_string()
+            } else {
+                format!("[xa{i}]")
+            };
+            let a_in_b = format!("[{}:a]", i + 1);
+            let a_out = if i == n - 2 {
+                "[a]".to_string()
+            } else {
+                format!("[xa{}]", i + 1)
+            };
+            af_parts.push(format!("{a_in_a}{a_in_b}acrossfade=d={fade_dur}{a_out}"));
+        }
+
+        let filter = format!("{};{}", vf_parts.join(";"), af_parts.join(";"));
+        let status = Command::new("ffmpeg")
+            .args(inputs.iter().map(|s| s.as_str()))
+            .args([
+                "-y",
+                "-filter_complex",
+                &filter,
+                "-map",
+                "[v]",
+                "-map",
+                "[a]",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-pix_fmt",
+                "yuv420p",
+                output,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                info!("Render: crossfade {n} clips → {output}");
+                return;
+            }
+            _ => info!("Render: chained xfade failed, falling back to concat"),
+        }
+    }
+
+    // Fallback: simple concat without transitions.
+    let list_path = format!("{work_dir}/concat.txt");
+    let list_content: String = clips
+        .iter()
+        .map(|p| {
+            let abs = std::fs::canonicalize(p).unwrap_or_else(|_| std::path::PathBuf::from(p));
+            format!("file '{}'\n", abs.display())
+        })
+        .collect();
+    std::fs::write(&list_path, &list_content).ok();
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y", "-f", "concat", "-safe", "0", "-i", &list_path, "-c", "copy", output,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    match status {
+        Ok(s) if s.success() => info!("Render: concat {n} clips → {output}"),
+        _ => info!("Render: concat also failed for {output}"),
+    }
+}
+
+/// Probe the duration of a media file in seconds.
+fn probe_duration(path: &str) -> Option<f64> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "quiet", "-print_format", "json", "-show_format", path])
+        .output()
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    json["format"]["duration"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
 }
 
 /// Render a minimal placeholder video.
