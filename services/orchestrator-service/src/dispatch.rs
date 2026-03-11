@@ -341,10 +341,35 @@ pub async fn build_stage_request(
                         .collect()
                 })
                 .unwrap_or_default();
-            Ok(serde_json::json!({
+            // Pull SRT path from Captions output.
+            let captions = store
+                .get_stage_output(job_id, "Captions")
+                .await
+                .ok()
+                .flatten();
+            let srt_path = captions
+                .as_ref()
+                .and_then(|c| c["srt_path"].as_str().map(String::from));
+            // Pull script segments for title card / visual layout.
+            let script = store
+                .get_stage_output(job_id, "Script")
+                .await
+                .ok()
+                .flatten();
+            let mut req = serde_json::json!({
                 "job_id": job_id,
+                "title": job.request.title,
                 "audio_files": audio_files,
-            }))
+            });
+            if let Some(srt) = srt_path {
+                req["srt_path"] = serde_json::Value::String(srt);
+            }
+            if let Some(ref s) = script
+                && let Some(segs) = s.get("segments")
+            {
+                req["segments"] = segs.clone();
+            }
+            Ok(req)
         }
         "QaFinal" => {
             // Pull output path from render output.
