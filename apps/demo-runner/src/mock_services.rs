@@ -176,31 +176,47 @@ async fn tts(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
 
     let segment_files: Vec<serde_json::Value> = segments
         .iter()
-        .map(|seg| {
+        .enumerate()
+        .map(|(i, seg)| {
             let num = seg["segment_number"].as_u64().unwrap_or(1);
             let dur = seg["estimated_duration_seconds"].as_u64().unwrap_or(10);
             let path = format!("{dir}/seg{num:03}.wav");
 
-            // Generate real silent audio file with ffmpeg.
+            // Generate audio with a chime at the start + soft ambient tone.
+            // Each segment gets a different pitch so transitions are audible.
             if !Path::new(&path).exists() {
+                let base_freq = 220.0 + (i as f64 * 110.0); // A3, C#4, E4, ...
+                let chime_freq = base_freq * 2.0;
+                // Short chime (0.3s) then quiet background tone for the rest.
+                let filter = format!(
+                    "sine=f={chime_freq}:d=0.3,afade=t=out:st=0.1:d=0.2[chime];\
+                     sine=f={base_freq}:d={dur},volume=0.08[bg];\
+                     [chime][bg]amix=inputs=2:duration=longest,\
+                     afade=t=in:d=0.05,afade=t=out:st={fade_start}:d=0.5",
+                    fade_start = dur as f64 - 0.5
+                );
                 let status = Command::new("ffmpeg")
                     .args([
                         "-y",
                         "-f",
                         "lavfi",
                         "-i",
-                        "anullsrc=r=44100:cl=mono",
-                        "-t",
-                        &dur.to_string(),
+                        &filter,
+                        "-ar",
+                        "44100",
+                        "-ac",
+                        "1",
                         "-c:a",
                         "pcm_s16le",
+                        "-t",
+                        &dur.to_string(),
                         &path,
                     ])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status();
                 match status {
-                    Ok(s) if s.success() => info!("TTS: created {path} ({dur}s)"),
+                    Ok(s) if s.success() => info!("TTS: created {path} ({dur}s, {base_freq}Hz)"),
                     _ => info!("TTS: ffmpeg failed for {path}, returning path anyway"),
                 }
             }
