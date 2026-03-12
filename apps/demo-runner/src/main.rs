@@ -302,13 +302,16 @@ async fn run_demo(api_url: &str, mock_port: u16) -> Result<()> {
     println!("  - Data flow: plan → research → script → TTS → ASR → captions → render → QA");
     println!("  - Artifact store: job persistence, stage outputs, event log");
     println!("  - Job queue: enqueue/dequeue/acknowledge lifecycle");
+    println!("  - TTS: real WAV audio with per-segment tones and chime transitions");
+    println!("  - Captions: real SRT file with timed subtitle cues");
+    println!("  - Render: real MP4 with title card, burned subtitles, crossfade transitions");
+    println!("  - QA: real ffprobe analysis of rendered video (duration, codecs, streams)");
     println!();
-    println!("Gaps identified (needs real implementation):");
-    println!("  - TTS: mock returns file paths but no actual audio files");
-    println!("  - Render: mock returns output path but no actual video");
-    println!("  - QA: mock skips actual ffprobe/loudness checks");
+    println!("Gaps remaining (needs real implementation):");
     println!("  - No LLM calls: script/plan text is templated, not generated");
-    println!("  - No real media assets (images, music) in the pipeline");
+    println!("  - No real TTS voice: audio is sine-wave tones, not speech");
+    println!("  - No real media assets (images, music, b-roll) in the pipeline");
+    println!("  - ASR validation is mocked (returns expected text as transcript)");
 
     Ok(())
 }
