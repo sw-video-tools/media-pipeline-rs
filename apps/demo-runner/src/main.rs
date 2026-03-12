@@ -313,6 +313,24 @@ async fn run_demo(api_url: &str, mock_port: u16) -> Result<()> {
     println!("  - No real media assets (images, music, b-roll) in the pipeline");
     println!("  - ASR validation is mocked (returns expected text as transcript)");
 
+    // Show output artifacts and playback command.
+    if let Some(outputs) = detail["stage_outputs"].as_object()
+        && let Some(render) = outputs.get("RenderFinal")
+    {
+        let video = render["output_path"].as_str().unwrap_or("");
+        let thumb = render["thumbnail_path"].as_str().unwrap_or("");
+        if !video.is_empty() {
+            println!();
+            println!("Output artifacts:");
+            println!("  Video:     {video}");
+            if !thumb.is_empty() {
+                println!("  Thumbnail: {thumb}");
+            }
+            println!();
+            println!("Play with:   open {video}");
+        }
+    }
+
     Ok(())
 }
 
@@ -360,7 +378,12 @@ fn summarize_output(stage: &str, output: &serde_json::Value) -> String {
         "RenderFinal" => {
             let path = output["output_path"].as_str().unwrap_or("?");
             let fmt = output["format"].as_str().unwrap_or("?");
-            format!("{fmt} → {path}")
+            let thumb = if output["thumbnail_path"].is_string() {
+                " + thumbnail"
+            } else {
+                ""
+            };
+            format!("{fmt} → {path}{thumb}")
         }
         "QaFinal" => {
             let passed = output["passed"].as_bool().unwrap_or(false);

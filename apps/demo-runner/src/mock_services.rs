@@ -355,11 +355,40 @@ async fn render(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> 
         join_clips_with_fade(&clip_paths, &output_path, &dir);
     }
 
-    Json(serde_json::json!({
+    // Extract thumbnail from the first frame of the final video.
+    let thumb_path = format!("{dir}/thumbnail.jpg");
+    if Path::new(&output_path).exists() {
+        let status = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                &output_path,
+                "-vframes",
+                "1",
+                "-update",
+                "1",
+                "-q:v",
+                "2",
+                &thumb_path,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => info!("Render: thumbnail → {thumb_path}"),
+            _ => info!("Render: thumbnail extraction failed"),
+        }
+    }
+
+    let mut result = serde_json::json!({
         "job_id": job_id,
         "output_path": output_path,
         "format": "mp4",
-    }))
+    });
+    if Path::new(&thumb_path).exists() {
+        result["thumbnail_path"] = serde_json::Value::String(thumb_path);
+    }
+    Json(result)
 }
 
 /// Render intro segment: dark gradient background with large centered title and subtitle.
