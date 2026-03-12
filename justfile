@@ -90,6 +90,7 @@ demo-services:
     set -euo pipefail
     trap 'kill $(jobs -p) 2>/dev/null' EXIT
     MOCK_PORT=${MOCK_PORT:-3200}
+    mkdir -p data
     echo "Starting mock services on port $MOCK_PORT..."
     cargo run -p demo-runner -- mock &
     sleep 1
@@ -125,6 +126,7 @@ demo:
     MOCK_PORT=${MOCK_PORT:-3200}
     trap 'kill $(jobs -p) 2>/dev/null' EXIT
     echo "=== Starting demo infrastructure ==="
+    mkdir -p data
     cargo run -p demo-runner -- mock &
     sleep 1
     PLANNER_URL=http://127.0.0.1:$MOCK_PORT \
